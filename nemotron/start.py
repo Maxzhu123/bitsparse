@@ -19,7 +19,8 @@ from lib_sparse.src.bitsparse import TensorBuffer
 # MODEL_NAME = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"
 MODEL_NAME = "nvidia/Nemotron-H-8B-Base-8K"
 
-with open("sample_text.txt", "r") as f:
+current_dir = os.path.dirname(__file__)
+with open(os.path.join(current_dir, "sample_text.txt"), "r") as f:
     prompt = f.read()
 
 
@@ -121,7 +122,7 @@ def main():
         MODEL_NAME, dtype=dtype, trust_remote_code=True).to(device)
     setup_hooks(model)
 
-    token_sizes = [3500, 4000, 4500, 5000, 5500, 6000, 6500, 7000] # [50, 100, 200, 300, 400, 500, 700, 900, 1100, 1300, 1500, 2000] #
+    token_sizes = [50, 100, 200, 300, 400, 500, 700, 900, 1100, 1300, 1500, 2000] #[2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000, 6500, 7000] #
     for train_tokens in token_sizes:
         run_tests(model, tokenizer, device, train_tokens)
     # train_tokens = 500
