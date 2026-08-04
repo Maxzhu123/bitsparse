@@ -5,10 +5,7 @@ from src.code.triton_operators import compact_vals, tile_pack
 from src.bitsparse import BitsparseTensor, TensorBuffer, tile_grid, BLOCK_M, BLOCK_N
 
 
-def dense_to_tilesparse(
-    dense: Tensor,
-    sparse_data: TensorBuffer | None = None,
-) -> BitsparseTensor:
+def dense_to_tilesparse(dense: Tensor, sparse_data: TensorBuffer|None = None) -> BitsparseTensor:
     """Convert a dense activation matrix into a BitsparseTensor.
 
     When sparse_data is provided, values are appended to its shared buffer.

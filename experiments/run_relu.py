@@ -9,11 +9,11 @@ from src.bitsparse import TensorBuffer
 from experiments.utils import setup_hooks
 
 FFN_BLOCK_LAYERS = 2
-LAYERS = 8
+LAYERS = 7
 BATCH_SIZE = 10000
 DIM = 4096
 
-BASIC_MODE = True
+BASIC_MODE = False
 
 class DeepFFN(DeepFFN_abc):
     handles: list
@@ -30,8 +30,8 @@ class DeepFFN(DeepFFN_abc):
         if self.block_layers == 2:
             for W1, W2 in zip(self.W1s, self.W2s):
                 x_inner = x
-                # x = x + FFNSparse.apply(x_inner, W1, W2, buffer)
                 x = x + FFNRelu.apply(x_inner, W1, W2, buffer)
+                # x = x + FFNSparse.apply(x_inner, W1, W2, buffer)
         else:
             for W1, W2, W3 in zip(self.W1s, self.W2s, self.W3s):
                 x_inner = x

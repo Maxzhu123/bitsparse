@@ -153,7 +153,7 @@ def _compact_vals_kernel(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# _unpack_batch_kernel
+# _unpack_batch_kernel / _unpack_relu2_batch_kernel
 #   Reconstructs dense tiles from the sparse representation.
 #   For each tile t in a batch of rows:
 #     D_tile = 0
@@ -161,27 +161,24 @@ def _compact_vals_kernel(
 #         D_tile[i] = vals[prefix[t] + rank[i]]
 #   This computes: D_rowslice = gather(vals, bitmask, prefix)
 #   where D_rowslice ∈ R^{batch_rows × K} is written into dense_ptr.
+#
+#   Both kernels share the same gather + store; the only difference is the
+#   elementwise transform applied before writing: identity for _unpack_batch_kernel
+#   vs ``r → k * r²`` for _unpack_relu2_batch_kernel.
 # ═══════════════════════════════════════════════════════════════════════════════
-@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows"])
 @triton.jit
-def _unpack_batch_kernel(
-    vals_ptr,           # input:  compact nonzero values (bf16)
-    bitmask_ptr,        # input:  uint8 packed bitmasks
-    prefix_ptr,         # input:  int32[n_tiles+1] exclusive prefix sum
-    layer_offset_ptr,   # input:  int32[1] global offset for this layer
-    dense_ptr,          # output: dense bf16 buffer of shape [batch_rows, K]
-    first_m_tile,       # first row-tile in this batch
-    grid_n_sparse, K,   # tile grid width and dense row stride
-    batch_rows,         # number of rows in this output batch
+def _unpack_tile(
+    vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
+    first_m_tile, grid_n_sparse,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
 ):
+    """Gather this program's tile values from the compact store."""
     pid = tl.program_id(0)
-    row_tile_in_batch = pid // grid_n_sparse       # which row-tile within batch
-    k_tile = pid % grid_n_sparse                   # which column-tile
+    row_tile_in_batch = pid // grid_n_sparse
+    k_tile = pid % grid_n_sparse
 
-    orig_row_tile = first_m_tile + row_tile_in_batch
-    tile_id = orig_row_tile * grid_n_sparse + k_tile
+    tile_id = (first_m_tile + row_tile_in_batch) * grid_n_sparse + k_tile
 
     # Unpack uint8 bitmask → bool mask of length TILE_NUMEL.
     #   mask[i] = (bitmask[i//8] >> (i%8)) & 1
@@ -192,16 +189,26 @@ def _unpack_batch_kernel(
     bits = (bytes_2d >> bit_pos) & 1
     mask_bits = tl.reshape(bits.to(tl.int32), (TILE_NUMEL,))
 
-    # rank[i] = cumulative count of set bits before position i
-    # The nonzero values for this tile occupy vals[base : base + count[tile]],
-    # and the i-th nonzero belongs at vals[base + rank[i]].
-    offset = tl.load(layer_offset_ptr)
+    # rank[i] = cumulative count of set bits before position i; the i-th
+    # nonzero value sits at vals[base + rank[i]].
+    offset = tl.load(vals_offset_ptr)
     base = tl.load(prefix_ptr + tile_id) + offset
     ranks = tl.cumsum(mask_bits, 0) - 1
-    v = tl.load(vals_ptr + base + ranks, mask=(mask_bits == 1), other=0.0)
+    return tl.load(vals_ptr + base + ranks, mask=(mask_bits == 1), other=0.0)
 
-    v_2d = tl.reshape(v, (BLOCK_M, BLOCK_N))
 
+@triton.jit
+def _store_tile(
+    dense_ptr, tile_vals,
+    grid_n_sparse, batch_rows, K,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+):
+    """Write one reshaped tile into the dense ``[batch_rows, K]`` output."""
+    pid = tl.program_id(0)
+    row_tile_in_batch = pid // grid_n_sparse
+    k_tile = pid % grid_n_sparse
+
+    v_2d = tl.reshape(tile_vals, (BLOCK_M, BLOCK_N))
     row_base = row_tile_in_batch * BLOCK_M
     offs_m = (row_base + tl.arange(0, BLOCK_M))[:, None]
     offs_k = (k_tile * BLOCK_N + tl.arange(0, BLOCK_N))[None, :]
@@ -209,10 +216,24 @@ def _unpack_batch_kernel(
     tl.store(dense_ptr + offs, v_2d, mask=(offs_m < batch_rows) & (offs_k < K))
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# _unpack_relu2_batch_kernel
-#   Unpacks stored r = relu(a) tiles as k * r² into dense output.
-# ═══════════════════════════════════════════════════════════════════════════════
+@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows"])
+@triton.jit
+def _unpack_batch_kernel(
+    vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
+    dense_ptr,
+    first_m_tile, grid_n_sparse, K, batch_rows,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+    TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
+):
+    """Unpack stored tile values as-is into a dense ``[batch_rows, K]`` slice."""
+    vals = _unpack_tile(vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
+                        first_m_tile, grid_n_sparse,
+                        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+                        TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES)
+    _store_tile(dense_ptr, vals, grid_n_sparse, batch_rows, K,
+                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
+
+
 @triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows"])
 @triton.jit
 def _unpack_relu2_batch_kernel(
@@ -223,35 +244,13 @@ def _unpack_relu2_batch_kernel(
     TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
     RELU2_SCALE: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    row_tile_in_batch = pid // grid_n_sparse
-    k_tile = pid % grid_n_sparse
-
-    orig_row_tile = first_m_tile + row_tile_in_batch
-    tile_id = orig_row_tile * grid_n_sparse + k_tile
-
-    byte_offs = tile_id * TILE_BYTES + tl.arange(0, TILE_BYTES)
-    bytes_val = tl.load(bitmask_ptr + byte_offs).to(tl.int32)
-    bytes_2d = tl.reshape(bytes_val, (TILE_BYTES, 1))
-    bit_pos = tl.arange(0, 8)[None, :]
-    bits = (bytes_2d >> bit_pos) & 1
-    mask_bits = tl.reshape(bits.to(tl.int32), (TILE_NUMEL,))
-
-    offset = tl.load(vals_offset_ptr)
-    base = tl.load(prefix_ptr + tile_id) + offset
-    ranks = tl.cumsum(mask_bits, 0) - 1
-    r = tl.load(vals_ptr + base + ranks, mask=(mask_bits == 1), other=0.0)
-    #rdtype = r.dtype
-    #r = r.to(tl.float32)
-    z = RELU2_SCALE * r * r
-    #z = z.to(rdtype)
-    z_2d = tl.reshape(z, (BLOCK_M, BLOCK_N))
-
-    row_base = row_tile_in_batch * BLOCK_M
-    offs_m = (row_base + tl.arange(0, BLOCK_M))[:, None]
-    offs_k = (k_tile * BLOCK_N + tl.arange(0, BLOCK_N))[None, :]
-    offs = offs_m * K + offs_k
-    tl.store(dense_ptr + offs, z_2d, mask=(offs_m < batch_rows) & (offs_k < K))
+    """Unpack stored ``r = relu(a)`` tiles as ``k * r²`` into dense output."""
+    r = _unpack_tile(vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
+                     first_m_tile, grid_n_sparse,
+                     BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+                     TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES)
+    _store_tile(dense_ptr, RELU2_SCALE * r * r, grid_n_sparse, batch_rows, K,
+                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -281,8 +280,7 @@ def _relu_grad_sparse_kernel(
     byte_offs = tile_id * TILE_BYTES + tl.arange(0, TILE_BYTES)
     bytes_val = tl.load(bitmask_ptr + byte_offs).to(tl.int32)
     bytes_2d = tl.reshape(bytes_val, (TILE_BYTES, 1))
-    bit_pos = tl.arange(0, 8)[None, :]
-    bits = tl.reshape((bytes_2d >> bit_pos) & 1, (BLOCK_M, BLOCK_N))
+    bits = tl.reshape((bytes_2d >> tl.arange(0, 8)[None, :]) & 1, (BLOCK_M, BLOCK_N))
 
     # Element-wise:  gz[p,q] = 0 if Z[p,q] ≤ 0, else gz[p,q]
     masked = tl.where(bits != 0, gz, 0.0)

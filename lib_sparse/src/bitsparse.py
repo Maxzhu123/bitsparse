@@ -34,14 +34,14 @@ class BitsparseTensor:
         self.vals = vals
         self.bitmask = bitmask
         self.prefix = prefix
+        if vals_offset is None:
+            vals_offset = torch.tensor(0, device=vals.device, dtype=torch.int32)
+        self.vals_offset = vals_offset
         self.grid_m = grid_m
         self.grid_n = grid_n
         self.BLOCK_M = BLOCK_M
         self.BLOCK_N = BLOCK_N
         self.shape = shape
-        if vals_offset is None:
-            vals_offset = torch.tensor(0, device=vals.device, dtype=torch.int32)
-        self.vals_offset = vals_offset
 
     def __repr__(self):
         return (f"BitsparseTensor(shape={list(self.shape)}, "
