@@ -31,6 +31,9 @@ import triton.language as tl
 #     relu2_grad_sparse) are also autotuned so num_warps/num_stages are picked
 #     per shape instead of hand-tuned.
 #
+# _relu2_grad_sparse_kernel is in-place/non-idempotent, so its autotune uses
+# restore_value=["grad_ptr"] to reset grad between benchmark iterations.
+#
 # BLOCK_M/BLOCK_N/TILE_* are NOT tuned: they define the BitsparseTensor format
 # itself and every kernel operating on a tensor must agree on them.
 #
@@ -267,6 +270,7 @@ def _relu_grad_sparse_kernel(
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     TILE_BYTES: tl.constexpr,
 ):
+    """In-place: grad <- grad * (relu(a) > 0), matching the stored bitmask."""
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
     grid_n = tl.num_programs(1)
@@ -274,17 +278,17 @@ def _relu_grad_sparse_kernel(
     rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs = rm[:, None] * N + rn[None, :]
-    gz = tl.load(grad_ptr + offs, mask=(rm[:, None] < M) & (rn[None, :] < N), other=0.0)
+    grad = tl.load(grad_ptr + offs, mask=(rm[:, None] < M) & (rn[None, :] < N), other=0.0)
 
     tile_id = pid_m * grid_n + pid_n
     byte_offs = tile_id * TILE_BYTES + tl.arange(0, TILE_BYTES)
     bytes_val = tl.load(bitmask_ptr + byte_offs).to(tl.int32)
     bytes_2d = tl.reshape(bytes_val, (TILE_BYTES, 1))
-    bits = tl.reshape((bytes_2d >> tl.arange(0, 8)[None, :]) & 1, (BLOCK_M, BLOCK_N))
+    mask_2d = tl.reshape((bytes_2d >> tl.arange(0, 8)[None, :]) & 1, (BLOCK_M, BLOCK_N))
 
-    # Element-wise:  gz[p,q] = 0 if Z[p,q] ≤ 0, else gz[p,q]
-    masked = tl.where(bits != 0, gz, 0.0)
-    tl.store(grad_ptr + offs, masked, mask=(rm[:, None] < M) & (rn[None, :] < N))
+    # Element-wise:  grad[p,q] = 0 if Z[p,q] ≤ 0, else grad[p,q]
+    grad_preact = tl.where(mask_2d != 0, grad, 0.0)
+    tl.store(grad_ptr + offs, grad_preact, mask=(rm[:, None] < M) & (rn[None, :] < N))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -292,8 +296,11 @@ def _relu_grad_sparse_kernel(
 #   Computes:  grad_preact = grad * 2 * k * r  (for active entries, r = relu(a) > 0)
 #   where z = k * r^2, so the derivative w.r.t. the preactivation is dz/da = 2*k*r.
 #   In-place update on grad.
+#
+#   Autotuned with restore_value=["grad_ptr"]: resets in-place grad between
+#   benchmark iterations so the non-idempotent transform never compounds.
 # ═══════════════════════════════════════════════════════════════════════════════
-@triton.autotune(configs=_MASK_CONFIGS, key=["M", "N"])
+@triton.autotune(configs=_MASK_CONFIGS, key=["M", "N"], restore_value=["grad_ptr"])
 @triton.jit
 def _relu2_grad_sparse_kernel(
     grad_ptr, vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
@@ -318,15 +325,15 @@ def _relu2_grad_sparse_kernel(
     bytes_val = tl.load(bitmask_ptr + byte_offs).to(tl.int32)
     bytes_2d = tl.reshape(bytes_val, (TILE_BYTES, 1))
     mask_bits = tl.reshape((bytes_2d >> tl.arange(0, 8)[None, :]) & 1, (TILE_NUMEL,))
+    mask_2d = tl.reshape(mask_bits, (BLOCK_M, BLOCK_N))
 
+    # r = relu(a) gathered from the compact store; dz/da = 2*k*r.
     offset = tl.load(vals_offset_ptr)
     base = tl.load(prefix_ptr + tile_id) + offset
     ranks = tl.cumsum(mask_bits, 0) - 1
     r = tl.load(vals_ptr + base + ranks, mask=(mask_bits == 1), other=0.0).to(tl.float32)
-    scale = 2.0 * RELU2_SCALE * r
-    scale_2d = tl.reshape(scale, (BLOCK_M, BLOCK_N))
-    bits_2d = tl.reshape(mask_bits, (BLOCK_M, BLOCK_N))
+    scale_2d = tl.reshape(2.0 * RELU2_SCALE * r, (BLOCK_M, BLOCK_N))
 
-    grad_preact = tl.where(bits_2d != 0, grad * scale_2d, 0.0)
+    grad_preact = tl.where(mask_2d != 0, grad * scale_2d, 0.0)
     tl.store(grad_ptr + offs, grad_preact, mask=(rm[:, None] < M) & (rn[None, :] < N))
 

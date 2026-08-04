@@ -96,6 +96,8 @@ def relu2_grad_sparse_(grad: Tensor, sparse_z: BitsparseTensor) -> Tensor:
     Computes `dpreact = grad * 2 * k * r` for active entries, where
     `z = k * r²` and `r = relu(a)` is stored sparsely.  `grad` is
     overwritten with the result and returned.
+
+    Autotuned; the kernel's restore_value resets grad between benchmarks.
     """
     BLOCK_M = sparse_z.BLOCK_M
     BLOCK_N = sparse_z.BLOCK_N
