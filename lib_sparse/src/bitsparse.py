@@ -99,20 +99,3 @@ def tile_grid(M: int, N: int, BLOCK_M: int, BLOCK_N: int) -> tuple[int, int, int
     num_tiles = grid_m * grid_n
     return grid_m, grid_n, num_tiles, TILE_NUMEL, TILE_BYTES
 
-
-@torch.no_grad()
-def inplace_mm_(A, W, B=2048):
-    """ A <- AW inplace operation. Done with batches. """
-    m, n = A.shape
-
-    x = torch.empty((B, n), device=A.device, dtype=A.dtype)
-    y = torch.empty_like(x)
-
-    for i in range(0, m, B):
-        b = min(B, m - i)
-        x[:b].copy_(A[i:i+b])
-        torch.mm(x[:b], W, out=y[:b])
-        A[i:i+b].copy_(y[:b])
-    return A
-
-
