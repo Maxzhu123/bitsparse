@@ -7,8 +7,6 @@ from src.code.triton_kernels import (
     _unpack_relu2_batch_kernel,
     _relu_grad_sparse_kernel,
     _relu2_grad_sparse_kernel,
-    _relu2_layer_grad_kernel,
-    _relu_layer_sparse_kernel,
 )
 from src.bitsparse import RELU2_SCALE, BitsparseTensor
 
@@ -56,7 +54,6 @@ def unpack_batch_(
         first_m_tile, grid_n, K, batch_rows,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
-        num_warps=8, num_stages=2,
     )
     return output
 
@@ -76,7 +73,6 @@ def unpack_relu2_batch_(
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
         RELU2_SCALE=RELU2_SCALE,
-        num_warps=8, num_stages=2,
     )
     return output
 
@@ -90,7 +86,6 @@ def mask_with_bitmask_(grad: Tensor, sparse: BitsparseTensor) -> Tensor:
         sparse.shape[0], sparse.shape[1],
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_BYTES=BLOCK_M * BLOCK_N // 8,
-        num_warps=4, num_stages=2,
     )
     return grad
 
@@ -111,54 +106,5 @@ def relu2_grad_sparse_(grad: Tensor, sparse_z: BitsparseTensor) -> Tensor:
         TILE_NUMEL=BLOCK_M * BLOCK_N,
         TILE_BYTES=BLOCK_M * BLOCK_N // 8,
         RELU2_SCALE=RELU2_SCALE,
-        num_warps=8, num_stages=2,
     )
     return grad
-
-
-def relu2_layer_grad(
-    grad_output: Tensor, W2: Tensor, r_sparse: BitsparseTensor,
-) -> None:
-    """ Relu^2 backward layer, including linear and activation.
-    Overwrite r_sparse values with ``dpreact = (grad_output @ W2) * 2*k*r``.
-    BLOCK_K (inner-loop tile) is chosen by kernel autotune.
-    """
-    M, N = r_sparse.shape
-    BLOCK_M = r_sparse.BLOCK_M
-    BLOCK_N = r_sparse.BLOCK_N
-    _relu2_layer_grad_kernel[(r_sparse.grid_m, r_sparse.grid_n)](
-        grad_output, W2,
-        r_sparse.vals, r_sparse.bitmask, r_sparse.prefix, r_sparse.vals_offset,
-        r_sparse.vals,
-        M, N, r_sparse.grid_n,
-        D=grad_output.shape[1],
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-        TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
-        RELU2_SCALE=RELU2_SCALE,
-    )
-
-
-def relu_layer_sparse_(
-    grad_output: Tensor, W2: Tensor, z_sparse: BitsparseTensor,
-) -> BitsparseTensor:
-    """ Relu backward layer, including linear and activation.
-        Combine grad_z = grad_output @ W2,
-                grad_z = grad_z * (z>0)
-                grad_z = sparse(grad_z)
-        Overwrite z_sparse values.
-        BLOCK_K (inner-loop tile) is chosen by kernel autotune.
-    """
-    M, N = z_sparse.shape
-    BLOCK_M = z_sparse.BLOCK_M
-    BLOCK_N = z_sparse.BLOCK_N
-    _relu_layer_sparse_kernel[(z_sparse.grid_m, z_sparse.grid_n)](
-        grad_output, W2,
-        z_sparse.bitmask, z_sparse.prefix, z_sparse.vals_offset,
-        z_sparse.vals,
-        M, N, z_sparse.grid_n,
-        D=grad_output.shape[1],
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-        TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
-    )
-
-    return z_sparse

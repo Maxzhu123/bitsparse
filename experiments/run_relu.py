@@ -2,8 +2,7 @@ import torch
 import torch._logging
 import math
 
-# from forward_methods import
-from src.layers import FFNRelu, FFNSparse3
+from src.layers import FFNRelu, FFNRelu_3
 
 from experiments.experiment import run_step, DeepFFN_abc
 from src.bitsparse import TensorBuffer
@@ -36,8 +35,7 @@ class DeepFFN(DeepFFN_abc):
         else:
             for W1, W2, W3 in zip(self.W1s, self.W2s, self.W3s):
                 x_inner = x
-                x = x + FFNSparse3.apply(x_inner, W1, W2, W3, buffer)
-                # x = x + FFNRelu_3.apply(x_inner, W1, W2, W3, buffer)
+                x = x + FFNRelu_3.apply(x_inner, W1, W2, W3, buffer)
 
         return x
 

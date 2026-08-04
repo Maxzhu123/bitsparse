@@ -88,7 +88,7 @@ def benchmark_shape(
 
 def main() -> None:
     shapes = DEFAULT_SHAPES
-    n = 32
+    n = 8
     sp_ratios = [0.5, 0.8]
     iters = 32
     warmup = 5

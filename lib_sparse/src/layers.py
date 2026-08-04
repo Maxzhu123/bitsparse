@@ -3,7 +3,7 @@ import torch
 from torch import Tensor
 from torch.autograd import Function
 
-from src.code.functions import (dense_to_tilesparse, FFN_backward, FFN3_backward, FFN_relu2_3_backward, FFN_relu2_backward)
+from src.code.functions import dense_to_tilesparse
 from src.code.sparse_matmul import AspB, AspRelu2B
 from src.code.triton_operators import mask_with_bitmask_, relu2_grad_sparse_
 from src.bitsparse import BitsparseTensor, RELU2_SCALE
@@ -120,8 +120,6 @@ class FFNRelu2_3:
 # ------------------------------------------------------------
 # Manual implemented layers
 # ------------------------------------------------------------
-BACKWARD_IMPL = FFN_backward
-# BACKWARD_IMPL = FFN_backward_sparse
 class FFNSparse(Function):
     """Forward of FFN."""
 
@@ -133,7 +131,27 @@ class FFNSparse(Function):
         ctx.h_sparse = dense_to_tilesparse(h, sparse_data)
         return h @ W2.T
 
-    backward = staticmethod(BACKWARD_IMPL)
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        """Compute FFN gradients."""
+        x, W1, W2 = ctx.saved_tensors
+        h: BitsparseTensor = ctx.h_sparse
+        ctx.h_sparse = None
+        needs_x = ctx.needs_input_grad[0]
+
+        grad_W2 = AspB(grad_output.T, h)
+
+        grad_h = grad_output @ W2
+        grad_z = mask_with_bitmask_(grad_h, h)
+        del h
+
+        if needs_x:
+            grad_x = grad_z @ W1
+        else:
+            grad_x = None
+
+        grad_W1 = grad_z.T @ x
+        return grad_x, grad_W1, grad_W2, None
 
 
 class FFNSparseRelu2(Function):
@@ -160,6 +178,30 @@ class FFNSparseRelu2(Function):
         return out
 
     @staticmethod
-    def backward(ctx, grad_output):
-        return FFN_relu2_backward(ctx, grad_output)
+    def backward(ctx, grad_output: Tensor):
+        """Backward for ``y = relu(x @ W1.T)^2 @ W2.T`` using sparse saved ``z``.
+            grad_output.shape = [*bs, in_dim]
+        """
+        bs_dims = grad_output.shape[:-1]  # [*bs, in_dim]
+        grad_output = grad_output.reshape(-1, grad_output.shape[-1])
+        x, W1, W2 = ctx.saved_tensors
+        h = ctx.h_sparse
+        ctx.h_sparse = None
+        needs_x = ctx.needs_input_grad[0]
+
+        grad_W2 = AspRelu2B(grad_output.T, h)  # AspRelu2B_block(grad_output.T, z) #
+
+        grad_h2 = grad_output @ W2
+        grad_z = relu2_grad_sparse_(grad_h2, h)
+        del h
+
+        if needs_x:
+            grad_x = grad_z @ W1
+            grad_x = grad_x.reshape(*bs_dims, -1)
+        else:
+            grad_x = None
+        grad_W1 = grad_z.T @ x
+        return grad_x, grad_W1, grad_W2, None
+
+
 

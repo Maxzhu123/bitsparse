@@ -23,18 +23,18 @@ import triton.language as tl
 # ═══════════════════════════════════════════════════════════════════════════════
 # Autotune configs for the hot kernels.
 #
-# Tuned kernels: _tile_pack_kernel, _compact_vals_kernel (run once per layer on
-# every forward pass) and the two tl.dot matmul kernels (where the inner-loop
-# tile BLOCK_K is a pure performance parameter).
-#
-# Left hardcoded: the memory-bound elementwise/gather kernels (unpack_*,
-# mask_with_bitmask, relu2_grad_sparse) whose hand-picked num_warps are
-# near-optimal; autotuning them would only add compile time.
+# All kernels are autotuned over num_warps / num_stages:
+#   - _tile_pack_kernel, _compact_vals_kernel (run once per layer on every
+#     forward pass) and the two tl.dot matmul kernels (where the inner-loop
+#     tile BLOCK_K is a pure performance parameter).
+#   - The memory-bound elementwise/gather kernels (unpack_*, mask_with_bitmask,
+#     relu2_grad_sparse) are also autotuned so num_warps/num_stages are picked
+#     per shape instead of hand-tuned.
 #
 # BLOCK_M/BLOCK_N/TILE_* are NOT tuned: they define the BitsparseTensor format
 # itself and every kernel operating on a tensor must agree on them.
 #
-# Config sets are deliberately small (3 each) and keyed only on shape dims so
+# Config sets are deliberately small and keyed only on shape dims so
 # each fixed layer shape benchmarks exactly once.
 # ═══════════════════════════════════════════════════════════════════════════════
 _PACK_CONFIGS = [
@@ -54,6 +54,23 @@ _MATMUL_CONFIGS = [
     triton.Config({"BLOCK_K": 32}, num_warps=8, num_stages=3),  # previous hand-tuned
     triton.Config({"BLOCK_K": 64}, num_warps=8, num_stages=2),
     triton.Config({"BLOCK_K": 128}, num_warps=4, num_stages=3),
+]
+
+# Memory-bound gather kernels: configs are keyed on the dense output shape so
+# each distinct tile-grid / batch size benchmarks once.
+_UNPACK_CONFIGS = [
+    triton.Config({}, num_warps=4, num_stages=2),
+    triton.Config({}, num_warps=8, num_stages=2),
+    triton.Config({}, num_warps=8, num_stages=3),
+    triton.Config({}, num_warps=16, num_stages=2),
+]
+
+# Elementwise mask / gradient kernels (one tile per program, 2D grid).
+_MASK_CONFIGS = [
+    triton.Config({}, num_warps=2, num_stages=2),
+    triton.Config({}, num_warps=4, num_stages=2),
+    triton.Config({}, num_warps=4, num_stages=3),
+    triton.Config({}, num_warps=8, num_stages=2),
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -145,6 +162,7 @@ def _compact_vals_kernel(
 #   This computes: D_rowslice = gather(vals, bitmask, prefix)
 #   where D_rowslice ∈ R^{batch_rows × K} is written into dense_ptr.
 # ═══════════════════════════════════════════════════════════════════════════════
+@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows"])
 @triton.jit
 def _unpack_batch_kernel(
     vals_ptr,           # input:  compact nonzero values (bf16)
@@ -195,6 +213,7 @@ def _unpack_batch_kernel(
 # _unpack_relu2_batch_kernel
 #   Unpacks stored r = relu(a) tiles as k * r² into dense output.
 # ═══════════════════════════════════════════════════════════════════════════════
+@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows"])
 @triton.jit
 def _unpack_relu2_batch_kernel(
     vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
@@ -240,6 +259,7 @@ def _unpack_relu2_batch_kernel(
 #   Computes:  grad_preact = grad * (relu(a) > 0)
 #   In-place update on grad.
 # ═══════════════════════════════════════════════════════════════════════════════
+@triton.autotune(configs=_MASK_CONFIGS, key=["M", "N"])
 @triton.jit
 def _relu_grad_sparse_kernel(
     grad_ptr,           # input/output: dense gradient ∂L/∂Z ∈ R^{M×N} (in-place)
@@ -275,6 +295,7 @@ def _relu_grad_sparse_kernel(
 #   where z = k * r^2, so the derivative w.r.t. the preactivation is dz/da = 2*k*r.
 #   In-place update on grad.
 # ═══════════════════════════════════════════════════════════════════════════════
+@triton.autotune(configs=_MASK_CONFIGS, key=["M", "N"])
 @triton.jit
 def _relu2_grad_sparse_kernel(
     grad_ptr, vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
@@ -310,121 +331,4 @@ def _relu2_grad_sparse_kernel(
 
     grad_preact = tl.where(bits_2d != 0, grad * scale_2d, 0.0)
     tl.store(grad_ptr + offs, grad_preact, mask=(rm[:, None] < M) & (rn[None, :] < N))
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# _relu2_layer_grad
-#   Computes sparse dpreact = (grad_output @ W2) * 2*k*r, writing into vals_out.
-# ═══════════════════════════════════════════════════════════════════════════════
-@triton.autotune(configs=_MATMUL_CONFIGS, key=["M", "N"])
-@triton.jit
-def _relu2_layer_grad_kernel(
-    grad_output_ptr,
-    W2_ptr,
-    vals_ptr,
-    bitmask_ptr,
-    prefix_ptr,
-    vals_offset_ptr,
-    vals_out_ptr,
-    M, N, grid_n,
-    D: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
-    RELU2_SCALE: tl.constexpr,
-):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    tile_id = pid_m * grid_n + pid_n
-
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, BLOCK_K)
-
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for k_start in range(0, D, BLOCK_K):
-        k = k_start + offs_k
-        go = tl.load(
-            grad_output_ptr + offs_m[:, None] * D + k[None, :],
-            mask=(offs_m[:, None] < M) & (k[None, :] < D),
-            other=0.0,
-        )
-        w2 = tl.load(
-            W2_ptr + k[:, None] * N + offs_n[None, :],
-            mask=(k[:, None] < D) & (offs_n[None, :] < N),
-            other=0.0,
-        )
-        acc += tl.dot(go, w2)
-
-    byte_offs = tile_id * TILE_BYTES + tl.arange(0, TILE_BYTES)
-    bytes_val = tl.load(bitmask_ptr + byte_offs).to(tl.int32)
-    bytes_2d = tl.reshape(bytes_val, (TILE_BYTES, 1))
-    mask_bits = tl.reshape((bytes_2d >> tl.arange(0, 8)[None, :]) & 1, (TILE_NUMEL,))
-
-    offset = tl.load(vals_offset_ptr)
-    base = tl.load(prefix_ptr + tile_id) + offset
-    ranks = tl.cumsum(mask_bits, 0) - 1
-    r = tl.load(vals_ptr + base + ranks, mask=(mask_bits == 1), other=0.0).to(tl.float32)
-    grad_flat = tl.reshape(acc, (TILE_NUMEL,)) * (2.0 * RELU2_SCALE * r)
-    tl.store(vals_out_ptr + base + ranks, grad_flat, mask=(mask_bits == 1))
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# _grad_z_sparse_values_kernel
-#   Computes sparse grad_z = (∂L/∂Y) @ W₂, masked by the ReLU activation
-#   pattern, and writes the result into the existing sparse vals buffer.
-#
-#   This fuses three operations into one kernel:
-#     grad_z = (∂L/∂Y @ W₂) ⊙ (Z > 0)   with output kept sparse.
-# ═══════════════════════════════════════════════════════════════════════════════
-@triton.autotune(configs=_MATMUL_CONFIGS, key=["M", "N"])
-@triton.jit
-def _relu_layer_sparse_kernel(
-    grad_output_ptr,    # input:  ∂L/∂Y ∈ R^{M×D}
-    W2_ptr,             # input:  W₂ ∈ R^{D×N}
-    bitmask_ptr,        # input:  uint8 packed bitmasks
-    prefix_ptr,         # input:  int32[n_tiles+1] exclusive prefix sum
-    vals_offset_ptr,    # input:  int32[1] global offset for this layer
-    vals_out_ptr,       # output: compact sparse buffer (overwrites forward vals)
-    M, N, grid_n,
-    D: tl.constexpr,                                # inner dimension of matmul
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,                          # inner-loop tile size
-    TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
-):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    tile_id = pid_m * grid_n + pid_n
-
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, BLOCK_K)
-
-    # Blocked matrix multiplication:  acc += ∂L/∂Y[BM,D] @ W₂[D,BN]
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for k_start in range(0, D, BLOCK_K):
-        k = k_start + offs_k
-        go = tl.load(
-            grad_output_ptr + offs_m[:, None] * D + k[None, :],
-            mask=(offs_m[:, None] < M) & (k[None, :] < D),
-            other=0.0,
-        )
-        w2 = tl.load(
-            W2_ptr + k[:, None] * N + offs_n[None, :],
-            mask=(k[:, None] < D) & (offs_n[None, :] < N),
-            other=0.0,
-        )
-        acc += tl.dot(go, w2)
-
-    # Mask acc by bitmask and scatter into compact buffer.
-    byte_offs = tile_id * TILE_BYTES + tl.arange(0, TILE_BYTES)
-    bytes_val = tl.load(bitmask_ptr + byte_offs).to(tl.int32)
-    bytes_2d = tl.reshape(bytes_val, (TILE_BYTES, 1))
-    bit_pos = tl.arange(0, 8)[None, :]
-    mask_bits = tl.reshape((bytes_2d >> bit_pos) & 1, (TILE_NUMEL,))
-
-    ranks = tl.cumsum(mask_bits, 0) - 1
-    vals = tl.reshape(acc, (TILE_NUMEL,))
-    base = tl.load(vals_offset_ptr) + tl.load(prefix_ptr + tile_id)
-    tl.store(vals_out_ptr + base + ranks, vals, mask=(mask_bits == 1))
 
