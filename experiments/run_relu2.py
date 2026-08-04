@@ -9,13 +9,11 @@ from src.bitsparse import TensorBuffer
 from experiments.utils import setup_hooks
 
 FFN_BLOCK_LAYERS = 2
-LAYERS = 16
+LAYERS = 8
 BATCH_SIZE = 10000
 DIM = 4096
 
-# Set to True to reproduce run_relu2_basic.py behaviour:
-# no pre-allocated TensorBuffer, no hooks, and a single timed step.
-BASIC_MODE = False
+BASIC_MODE = True
 
 
 class DeepFFN(FFN_relu2_abc):
@@ -52,7 +50,7 @@ def evaluate():
 
     # Run baseline
     run_step(x, model, sparse=False, steps=1)
-    tracking_dn, vram_dn, avg_time = run_step(x, model, sparse=False, steps=1)
+    tracking_dn, vram_dn, avg_time = run_step(x, model, sparse=False, steps=3)
     print(f'Baseline: {vram_dn = :.2f} MB, {avg_time=:.2f} ms')
     print("-" * 50)
 
@@ -66,7 +64,7 @@ def evaluate():
 
     # Run sparse model
     run_step(x, model, buffer, sparse=True, steps=1)
-    tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, steps=3 if not BASIC_MODE else 1)
+    tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, steps=3)
     print(f"VRAM allocated by tensors: {vram:.2f} MB")
     print(f'Total time: {avg_time:.2f} ms')
 
