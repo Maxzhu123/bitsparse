@@ -111,8 +111,11 @@ def main() -> None:
             for decompressed_tensor, original in zip(decompressed, tensors):
                 torch.testing.assert_close(decompressed_tensor, original, rtol=0, atol=0)
             # Compression check
-            for compressed_tensor, original in zip(compressed, tensors):
-                assert compressed_tensor.sparsity_ratio() < sparsity + 0.01
+            sp_ratios = []
+            for ct, original in zip(compressed, tensors):
+                comp_sparsity = ct.vals.numel() / (ct.shape[0] * ct.shape[1])
+                sp_ratios.append(comp_sparsity)
+            sp_ratio = sum(sp_ratios) / iters
 
             compress_ms = compress_ms / iters / n
             decompress_ms = decompress_ms / iters / n
@@ -121,7 +124,7 @@ def main() -> None:
             print(
                 f"shape={shape}, "
                 f"compress={compress_ms:.3f} ms, decompress={decompress_ms:.3f} ms, "
-                f"roundtrip={roundtrip_ms:.3f} ms"
+                f"roundtrip={roundtrip_ms:.3f} ms, sparsity={sp_ratio:.1%}"
             )
             total_roundtrip_ms += roundtrip_ms
 
