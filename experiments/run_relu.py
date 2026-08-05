@@ -14,6 +14,7 @@ BATCH_SIZE = 10000
 DIM = 4096
 
 BASIC_MODE = False
+PACKED_15BIT = True
 
 class DeepFFN(DeepFFN_abc):
     handles: list
@@ -30,12 +31,12 @@ class DeepFFN(DeepFFN_abc):
         if self.block_layers == 2:
             for W1, W2 in zip(self.W1s, self.W2s):
                 x_inner = x
-                x = x + FFNRelu.apply(x_inner, W1, W2, buffer)
+                x = x + FFNRelu.apply(x_inner, W1, W2, buffer, PACKED_15BIT)
                 # x = x + FFNSparse.apply(x_inner, W1, W2, buffer)
         else:
             for W1, W2, W3 in zip(self.W1s, self.W2s, self.W3s):
                 x_inner = x
-                x = x + FFNRelu_3.apply(x_inner, W1, W2, W3, buffer)
+                x = x + FFNRelu_3.apply(x_inner, W1, W2, W3, buffer, PACKED_15BIT)
 
         return x
 
@@ -63,8 +64,12 @@ def evaluate():
     if not BASIC_MODE:
         hdim_expanded = math.floor(DIM * 5.25)
         buffer_scale = 0.6 * (2 if FFN_BLOCK_LAYERS == 3 else 1)
-        buffer_size = int(BATCH_SIZE * hdim_expanded * LAYERS * buffer_scale)
-        buffer = TensorBuffer(buffer_size, dtype=dtype, device="cuda")
+        value_capacity = int(BATCH_SIZE * hdim_expanded * LAYERS * buffer_scale)
+        bits_per_value = 15 if PACKED_15BIT else 16
+        buffer_size = (value_capacity * bits_per_value + 7) // 8
+        buffer = TensorBuffer(
+            buffer_size, dtype=dtype, device="cuda", packed_15bit=PACKED_15BIT
+        )
 
     run_step(x, model, buffer, sparse=True, steps=1)
     tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, steps=3)
