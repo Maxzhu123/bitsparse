@@ -3,7 +3,13 @@ import torch
 from torch import Tensor
 from torch.autograd import Function
 
-from src.code.functions import (dense_to_tilesparse, FFN_backward, FFN3_backward, FFN_relu2_3_backward, FFN_relu2_backward)
+from src.code.functions import (
+    dense_to_tilesparse,
+    FFN_backward_sparse,
+    FFN3_backward,
+    FFN_relu2_3_backward,
+    FFN_relu2_backward_sparse,
+)
 from src.code.sparse_matmul import AspB, AspRelu2B
 from src.code.triton_operators import mask_with_bitmask_, relu2_grad_sparse_
 from src.bitsparse import BitsparseTensor, RELU2_SCALE
@@ -120,20 +126,21 @@ class FFNRelu2_3:
 # ------------------------------------------------------------
 # Manual implemented layers
 # ------------------------------------------------------------
-BACKWARD_IMPL = FFN_backward
-# BACKWARD_IMPL = FFN_backward_sparse
 class FFNSparse(Function):
     """Forward of FFN."""
 
     @staticmethod
     def forward(ctx, x, W1, W2, sparse_data:TensorBuffer|None=None):
+        batch_shape = x.shape[:-1]
+        x = x.reshape(-1, x.shape[-1])
         ctx.save_for_backward(x, W1, W2)
         z = x @ W1.T
         h = z.relu_()
         ctx.h_sparse = dense_to_tilesparse(h, sparse_data)
-        return h @ W2.T
+        output = h @ W2.T
+        return output.reshape(*batch_shape, -1)
 
-    backward = staticmethod(BACKWARD_IMPL)
+    backward = staticmethod(FFN_backward_sparse)
 
 
 class FFNSparse3(Function):
@@ -179,7 +186,7 @@ class FFNSparseRelu2(Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        return FFN_relu2_backward(ctx, grad_output)
+        return FFN_relu2_backward_sparse(ctx, grad_output)
 
 
 class FFNSparseRelu2_3(Function):

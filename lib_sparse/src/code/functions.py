@@ -1,27 +1,44 @@
+from typing import NamedTuple
+
 import torch
 from torch import Tensor
 
 from src.code.triton_operators import (
     compact_vals,
+    compact_vals_15bit,
     mask_with_bitmask_,
+    relu_layer_grad,
     relu2_grad_sparse_,
     relu2_layer_grad,
-    tile_pack, relu_layer_sparse_
+    tile_pack,
 )
-from src.code.sparse_matmul import AspB, AspB_block, AspRelu2B_block, AspRelu2B, spAB_block
+from src.code.sparse_matmul import (
+    AspB,
+    AspB_block,
+    AspRelu2B_block,
+    AspRelu2B,
+    spAB_block,
+)
 from src.bitsparse import BitsparseTensor, TensorBuffer, inplace_mm_, tile_grid, BLOCK_M, BLOCK_N
+from src.code.bitpacking import pack_15bit_into, packed_storage_nbytes
 
 
-def dense_to_tilesparse(
-    dense: Tensor,
-    sparse_data: TensorBuffer | None = None,
-) -> BitsparseTensor:
-    """Convert a dense activation matrix into a BitsparseTensor.
+class _PreparedTiles(NamedTuple):
+    M: int
+    N: int
+    grid_m: int
+    grid_n: int
+    num_tiles: int
+    tile_numel: int
+    bitmasks: Tensor
+    prefix: Tensor
 
-    When sparse_data is provided, values are appended to its shared buffer.
-    Otherwise, this allocates a compact values tensor for this sparse tensor.
-    """
+
+def _prepare_tiles(dense: Tensor) -> _PreparedTiles:
+    """Create tile metadata and enqueue the count prefix sum."""
     M, N = dense.shape
+    if dense.dtype not in (torch.bfloat16, torch.float16):
+        raise TypeError("15-bit sparse values require a bfloat16 or float16 input")
     grid_m, grid_n, num_tiles, TILE_NUMEL, TILE_BYTES = tile_grid(M, N, BLOCK_M, BLOCK_N)
 
     tile_counts = torch.empty(num_tiles, device=dense.device, dtype=torch.int32)
@@ -34,17 +51,49 @@ def dense_to_tilesparse(
     torch.cumsum(tile_counts, 0, out=tile_prefix[1:])
     tile_prefix[0] = 0
 
+    return _PreparedTiles(
+        M, N, grid_m, grid_n, num_tiles, TILE_NUMEL,
+        tile_bitmasks, tile_prefix,
+    )
+
+
+def _finish_tilesparse(
+    dense: Tensor,
+    prepared: _PreparedTiles,
+    sparse_data: TensorBuffer | None,
+    nnz: int | None = None,
+) -> BitsparseTensor:
+    """Allocate or select value storage and finish a prepared conversion."""
+    M, N = prepared.M, prepared.N
+    grid_m, grid_n = prepared.grid_m, prepared.grid_n
+    num_tiles, TILE_NUMEL = prepared.num_tiles, prepared.tile_numel
+    tile_bitmasks, tile_prefix = prepared.bitmasks, prepared.prefix
+
     if sparse_data is None:
-        vals = torch.empty(tile_prefix[-1].item(), device=dense.device, dtype=dense.dtype)
-        vals_offset = torch.tensor(0, device=dense.device, dtype=torch.int32)
+        if nnz is None:
+            raise ValueError("nnz is required for standalone sparse storage")
+        compact_values = torch.empty(nnz, device=dense.device, dtype=dense.dtype)
+        vals = torch.empty(
+            packed_storage_nbytes(nnz), device=dense.device, dtype=torch.uint8
+        )
+        vals_offset = torch.zeros(1, device=dense.device, dtype=torch.int32)
         update_offset = None
     else:
+        if sparse_data.dtype != dense.dtype:
+            raise TypeError(
+                f"TensorBuffer dtype {sparse_data.dtype} does not match input {dense.dtype}"
+            )
         vals = sparse_data.vals
         vals_offset = sparse_data.offset.clone()
         update_offset = sparse_data.offset
 
-    compact_vals(dense, tile_prefix, vals, vals_offset,
-                 M, N, grid_n, num_tiles, BLOCK_M, BLOCK_N, TILE_NUMEL)
+    if sparse_data is None:
+        compact_vals(dense, tile_prefix, compact_values, vals_offset,
+                     M, N, grid_n, num_tiles, BLOCK_M, BLOCK_N, TILE_NUMEL)
+        pack_15bit_into(compact_values, vals)
+    else:
+        compact_vals_15bit(dense, tile_prefix, vals, vals_offset,
+                           M, N, grid_n, num_tiles, BLOCK_M, BLOCK_N, TILE_NUMEL)
 
     if update_offset is not None:
         update_offset.add_(tile_prefix[-1])
@@ -52,12 +101,45 @@ def dense_to_tilesparse(
     return BitsparseTensor(
         vals, tile_bitmasks, tile_prefix,
         grid_m, grid_n, BLOCK_M, BLOCK_N, dense.shape,
-        vals_offset=vals_offset,
+        vals_offset=vals_offset, dtype=dense.dtype,
     )
+
+
+def dense_to_tilesparse(
+    dense: Tensor,
+    sparse_data: TensorBuffer | None = None,
+) -> BitsparseTensor:
+    """Convert one dense matrix into a :class:`BitsparseTensor`.
+
+    When ``sparse_data`` is provided, values are appended to its shared buffer.
+    Otherwise, compact storage is allocated for this tensor.
+    """
+    prepared = _prepare_tiles(dense)
+    nnz = None if sparse_data is not None else int(prepared.prefix[-1].item())
+    return _finish_tilesparse(dense, prepared, sparse_data, nnz)
+
+
+def dense_batch_to_tilesparse(tensors: list[Tensor]) -> list[BitsparseTensor]:
+    """Convert standalone tensors while synchronizing their value counts once."""
+    if not tensors:
+        return []
+    device = tensors[0].device
+    if any(tensor.device != device for tensor in tensors):
+        raise ValueError("all tensors in a compression batch must share a device")
+
+    prepared = [_prepare_tiles(tensor) for tensor in tensors]
+    counts = torch.stack([metadata.prefix[-1] for metadata in prepared])
+    nnz_values = counts.cpu().tolist()
+    return [
+        _finish_tilesparse(tensor, metadata, None, int(nnz))
+        for tensor, metadata, nnz in zip(tensors, prepared, nnz_values)
+    ]
 
 
 def FFN_backward(ctx, grad_output: Tensor):
     """Compute FFN gradients."""
+    batch_shape = grad_output.shape[:-1]
+    grad_output = grad_output.reshape(-1, grad_output.shape[-1])
     x, W1, W2 = ctx.saved_tensors
     h: BitsparseTensor = ctx.h_sparse
     ctx.h_sparse = None
@@ -71,6 +153,7 @@ def FFN_backward(ctx, grad_output: Tensor):
 
     if needs_x:
         grad_x = grad_z @ W1
+        grad_x = grad_x.reshape(*batch_shape, -1)
     else:
         grad_x = None
 
@@ -79,19 +162,22 @@ def FFN_backward(ctx, grad_output: Tensor):
 
 
 def FFN_backward_sparse(ctx, grad_output: Tensor):
-    """Compute FFN gradients while keeping grad_z in the existing bit-sparse storage."""
+    """Compute FFN gradients while keeping the hidden gradient tile-sparse."""
+    batch_shape = grad_output.shape[:-1]
+    grad_output = grad_output.reshape(-1, grad_output.shape[-1])
     x, W1, W2 = ctx.saved_tensors
-    h = ctx.h_sparse
+    relu_sparse = ctx.h_sparse
     ctx.h_sparse = None
     needs_x = ctx.needs_input_grad[0]
 
-    grad_W2 = AspB(grad_output.T, h)
-    # Combine grad_output @ W2, relu + masking. Updates h inplace.
-    grad_z = relu_layer_sparse_(grad_output, W2, h)
+    grad_W2 = AspB(grad_output.T, relu_sparse)
+    grad_z = relu_layer_grad(grad_output, W2, relu_sparse)
+    del relu_sparse
 
     grad_W1 = AspB_block(x.T, grad_z).T
     if needs_x:
         grad_x = spAB_block(grad_z, W1)
+        grad_x = grad_x.reshape(*batch_shape, -1)
     else:
         grad_x = None
     return grad_x, grad_W1, grad_W2, None
@@ -154,19 +240,24 @@ def FFN_relu2_backward(ctx, grad_output: Tensor):
 
 
 def FFN_relu2_backward_sparse(ctx, grad_output: Tensor):
-    """Backward keeping ``dpreact`` in sparse storage to reduce peak memory."""
+    """ReLU² backward with the hidden gradient kept tile-sparse."""
+    batch_shape = grad_output.shape[:-1]
+    grad_output = grad_output.reshape(-1, grad_output.shape[-1])
     x, W1, W2 = ctx.saved_tensors
-    z = ctx.z_sparse
-    ctx.z_sparse = None
+    relu_sparse = ctx.h_sparse
+    ctx.h_sparse = None
     needs_x = ctx.needs_input_grad[0]
 
-    grad_W2 = AspRelu2B(grad_output.T, z) # AspRelu2B_block(grad_output.T, z) #
-
-    relu2_layer_grad(grad_output, W2, z)
-    grad_z = z
+    grad_W2 = AspRelu2B(grad_output.T, relu_sparse)
+    grad_z = relu2_layer_grad(grad_output, W2, relu_sparse)
+    del relu_sparse
 
     grad_W1 = AspB_block(x.T, grad_z).T
-    grad_x = spAB_block(grad_z, W1) if needs_x else None
+    if needs_x:
+        grad_x = spAB_block(grad_z, W1)
+        grad_x = grad_x.reshape(*batch_shape, -1)
+    else:
+        grad_x = None
 
     return grad_x, grad_W1, grad_W2, None
 

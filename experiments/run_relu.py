@@ -31,7 +31,6 @@ class DeepFFN(DeepFFN_abc):
         if self.block_layers == 2:
             for W1, W2 in zip(self.W1s, self.W2s):
                 x_inner = x
-                # x = x + FFNSparse.apply(x_inner, W1, W2, buffer)
                 x = x + FFNRelu.apply(x_inner, W1, W2, buffer)
         else:
             for W1, W2, W3 in zip(self.W1s, self.W2s, self.W3s):

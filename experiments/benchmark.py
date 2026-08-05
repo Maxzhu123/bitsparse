@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 
 from src.bitsparse import BitsparseTensor
-from src.code.functions import dense_to_tilesparse
+from src.code.functions import dense_batch_to_tilesparse
 from src.code.triton_operators import unpack_batch_
 
 
@@ -29,7 +29,7 @@ def decompress(sparse: BitsparseTensor) -> Tensor:
     """Decompress all tiles in ``sparse`` into a newly allocated dense tensor."""
     rows, columns = sparse.shape
     output = torch.empty(
-        (rows, columns), device=sparse.vals.device, dtype=sparse.vals.dtype
+        (rows, columns), device=sparse.vals.device, dtype=sparse.dtype
     )
     unpack_batch_(
         sparse,
@@ -45,7 +45,7 @@ def decompress(sparse: BitsparseTensor) -> Tensor:
 
 def compress_batch(tensors: list[Tensor]) -> list[BitsparseTensor]:
     """Compress every dense tensor in a batch."""
-    return [dense_to_tilesparse(tensor) for tensor in tensors]
+    return dense_batch_to_tilesparse(tensors)
 
 
 def decompress_batch(tensors: list[BitsparseTensor]) -> list[Tensor]:
@@ -111,11 +111,11 @@ def main() -> None:
             for decompressed_tensor, original in zip(decompressed, tensors):
                 torch.testing.assert_close(decompressed_tensor, original, rtol=0, atol=0)
             # Compression check
-            sp_ratios = []
+            compression_ratios = []
             for ct, original in zip(compressed, tensors):
-                comp_sparsity = ct.vals.numel() / (ct.shape[0] * ct.shape[1])
-                sp_ratios.append(comp_sparsity)
-            sp_ratio = sum(sp_ratios) / iters
+                dense_nbytes = original.numel() * original.element_size()
+                compression_ratios.append(ct.nbytes() / dense_nbytes)
+            compression_ratio = sum(compression_ratios) / n
 
             compress_ms = compress_ms / iters / n
             decompress_ms = decompress_ms / iters / n
@@ -124,7 +124,7 @@ def main() -> None:
             print(
                 f"shape={shape}, "
                 f"compress={compress_ms:.3f} ms, decompress={decompress_ms:.3f} ms, "
-                f"roundtrip={roundtrip_ms:.3f} ms, sparsity={sp_ratio:.1%}"
+                f"roundtrip={roundtrip_ms:.3f} ms, compression={compression_ratio:.1%}"
             )
             total_roundtrip_ms += roundtrip_ms
 

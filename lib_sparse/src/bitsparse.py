@@ -1,27 +1,21 @@
 import torch
 from torch import Tensor
 
+from src.code.bitpacking import packed_nbytes, packed_storage_nbytes
+
 # Constant for RELU^2 scaling
 RELU2_SCALE = 1
 BLOCK_M = 64        # Rows per tile
 BLOCK_N = 64        # Columns per tile
 
 
-class BitsparseTensor:
-    """Tile-wise bitmask sparse tensor for a dense matrix of shape ``shape``.
-
-    ``vals`` stores positive entries in row-major tile order, ``bitmask`` marks
-    nonzero locations with one bit per element, and ``prefix[t]`` gives the
-    starting offset of tile ``t`` in ``vals``.
-
-    ``vals_offset`` is an optional int32 tensor giving the starting offset of
-    this layer's values inside a shared ``vals`` buffer.  When ``None`` (the
-    default), a zero tensor is created so the tensor is self-contained.
-    """
+class _TileSparseTensor:
+    """Metadata shared by packed activations and signed sparse gradients."""
     vals: Tensor
     bitmask: Tensor
     prefix: Tensor
     vals_offset: Tensor
+    dtype: torch.dtype
     BLOCK_M: int
     BLOCK_N: int
     grid_m: int
@@ -29,8 +23,7 @@ class BitsparseTensor:
 
     def __init__(self, vals, bitmask, prefix,
                  grid_m, grid_n, BLOCK_M, BLOCK_N, shape,
-                 vals_offset=None):
-        """Store compressed values and tile metadata for later unpack/masking."""
+                 vals_offset, dtype):
         self.vals = vals
         self.bitmask = bitmask
         self.prefix = prefix
@@ -39,51 +32,85 @@ class BitsparseTensor:
         self.BLOCK_M = BLOCK_M
         self.BLOCK_N = BLOCK_N
         self.shape = shape
-        if vals_offset is None:
-            vals_offset = torch.tensor(0, device=vals.device, dtype=torch.int32)
+        self.dtype = dtype
         self.vals_offset = vals_offset
 
     def __repr__(self):
-        return (f"BitsparseTensor(shape={list(self.shape)}, "
+        return (f"{type(self).__name__}(shape={list(self.shape)}, "
                 f"nnz={self.prefix[-1]}, sparsity={self.sparsity_ratio():.2f})")
 
     def vram_size(self):
-        val_size = self.vals.element_size() * self.prefix[-1]
-        bitmask_size = self.bitmask.element_size() * self.bitmask.nelement()
-        prefix_size = self.prefix.element_size() * self.prefix.nelement()
-        return (val_size + bitmask_size + prefix_size) / 1024 ** 2
+        return self.nbytes() / 1024 ** 2
 
     def sparsity_ratio(self):
         return 1 - self.prefix[-1] / (self.shape[0] * self.shape[1])
 
 
+class BitsparseTensor(_TileSparseTensor):
+    """Tile-wise bitmask sparse tensor for a dense matrix of shape ``shape``.
+
+    ``vals`` stores positive entries as a continuous stream of 15-bit values in
+    row-major tile order, ``bitmask`` marks nonzero locations with one bit per
+    element, and ``prefix[t]`` gives the logical value offset of tile ``t``.
+
+    ``vals_offset`` is an int32 tensor giving the logical starting offset in
+    ``vals``. It is zero for self-contained tensors and advances when ``vals``
+    belongs to a shared :class:`TensorBuffer`.
+    """
+    def nbytes(self):
+        """Return bytes attributable to this tensor's sparse payload and metadata."""
+        nnz = int(self.prefix[-1].item())
+        val_size = packed_nbytes(nnz)
+        return val_size + self.bitmask.nbytes + self.prefix.nbytes + self.vals_offset.nbytes
+
+
+class SparseGradientTensor(_TileSparseTensor):
+    """Tile-sparse signed values produced by fused activation backpropagation.
+
+    This uses the same bitmask and prefix layout as :class:`BitsparseTensor`,
+    but stores ordinary 16-bit values. Gradients may be negative, so they
+    cannot use the positive-only 15-bit representation without losing data.
+    """
+    def nbytes(self):
+        nnz = int(self.prefix[-1].item())
+        return (nnz * self.vals.element_size() + self.bitmask.nbytes
+                + self.prefix.nbytes + self.vals_offset.nbytes)
+
+
+TileSparseTensor = BitsparseTensor | SparseGradientTensor
+
+
 class TensorBuffer:
+    """Preallocated storage for packed values shared across sparse tensors."""
+
     vals: Tensor
     offset: Tensor
 
     def __init__(self, size: int, device="cuda", dtype=torch.bfloat16):
-        """ size: number of elements in buffer
-            device: device of buffer
-            dtype: datatype of buffer"""
+        """Allocate capacity for ``size`` logical 15-bit values."""
         self.size = size
         self.device = device
         self.dtype = dtype
 
-        # Init storage tensors
-        self.vals = torch.zeros(self.size, device=self.device, dtype=self.dtype)
+        if self.dtype not in (torch.bfloat16, torch.float16):
+            raise TypeError("TensorBuffer supports only bfloat16 and float16 values")
+        self.vals = torch.zeros(
+            packed_storage_nbytes(self.size), device=self.device, dtype=torch.uint8
+        )
         self.offset = torch.zeros(1, device=self.device, dtype=torch.int32)
 
     def reset_buffer(self):
-        """ Set offset tensor inside main training loop, since this needs to be consistent. """
-        self.offset = torch.zeros(1, device=self.device, dtype=torch.int32)
+        """Clear packed storage and reset the next logical value offset."""
+        self.vals.zero_()
+        self.offset.zero_()
 
     def to_state(self):
-        """ Returns state in current buffer, decomposed into its objects for reloading. Useful for torch ops. """
+        """Return the state needed to reconstruct this buffer."""
         return self.size, self.device, self.dtype, self.vals, self.offset
 
     @staticmethod
     def from_state(size, device, dtype, vals, offset) -> TensorBuffer:
-        """ Creates a TensorBuffer instance from its state. """
+        """Reconstruct a buffer from :meth:`to_state` output."""
         buffer = TensorBuffer(size, device, dtype)
         buffer.vals = vals
         buffer.offset = offset
@@ -114,5 +141,3 @@ def inplace_mm_(A, W, B=2048):
         torch.mm(x[:b], W, out=y[:b])
         A[i:i+b].copy_(y[:b])
     return A
-
-
