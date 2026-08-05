@@ -27,13 +27,10 @@ class DeepFFN(FFN_relu2_abc):
         if self.block_layers == 2:
             for W1, W2 in zip(self.W1s, self.W2s):
                 x_inner = F.rms_norm(x, x.shape[1:])
-                # x = x + FFNSparseRelu2.apply(x_inner, W1, W2, buffer)
                 x = x + FFNRelu2.apply(x_inner, W1, W2, buffer)
-
         else:
             for W1, W2, W3 in zip(self.W1s, self.W2s, self.W3s):
                 x_inner = F.rms_norm(x, x.shape[1:])
-                # x = x + FFNSparseRelu2_3.apply(x_inner, W1, W2, W3, buffer)
                 x = x + FFNRelu2_3.apply(x_inner, W1, W2, W3, buffer)
 
         return x

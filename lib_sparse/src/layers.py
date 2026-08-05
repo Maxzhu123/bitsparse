@@ -31,12 +31,18 @@ class ReluLinear(Function):
     def backward(ctx, grad_output: Tensor):
         """Compute gradients."""
         W = ctx.saved_tensors[0]
+        needs_z = ctx.needs_input_grad[0]
         h: BitsparseTensor = ctx.h_sparse
         ctx.h_sparse = None
-        grad_W2 = AspB(grad_output.T, h)
-        grad_h = grad_output @ W
-        grad_z = mask_with_bitmask_(grad_h, h)
 
+        grad_W2 = AspB(grad_output.T, h)
+
+        # Gradients for input
+        if needs_z:
+            grad_h = grad_output @ W
+            grad_z = mask_with_bitmask_(grad_h, h)
+        else:
+            grad_z = None
         return grad_z, grad_W2, None
 
 
@@ -66,7 +72,6 @@ class Relu2Linear(Function):
     """y = relu(Wx)."""
 
     @staticmethod
-    @torch.compiler.disable
     def forward(ctx, z, W, sparse_data:TensorBuffer|None):
         """ relu(Wx) layer. """
         ctx.save_for_backward(W)
@@ -83,11 +88,18 @@ class Relu2Linear(Function):
     def backward(ctx, grad_output: Tensor):
         """Compute gradients."""
         W = ctx.saved_tensors[0]
+        needs_z = ctx.needs_input_grad[0]
         h: BitsparseTensor = ctx.h_sparse
         ctx.h_sparse = None
+
         grad_W2 = AspRelu2B(grad_output.T, h)
-        grad_h = grad_output @ W
-        grad_z = relu2_grad_sparse_(grad_h, h)
+
+        # Needs gradient for z
+        if needs_z:
+            grad_h = grad_output @ W
+            grad_z = relu2_grad_sparse_(grad_h, h)
+        else:
+            grad_z = None
 
         return grad_z, grad_W2, None
 
