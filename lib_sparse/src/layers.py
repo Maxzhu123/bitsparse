@@ -52,7 +52,6 @@ class FFNRelu:
     def apply(x, W1, W2, sparse_data:TensorBuffer|None=None):
         z = x @ W1.T
         y = ReluLinear.apply(z, W2, sparse_data)
-
         return y
 
 
@@ -201,7 +200,7 @@ class FFNSparseRelu2(Function):
         ctx.h_sparse = None
         needs_x = ctx.needs_input_grad[0]
 
-        grad_W2 = AspRelu2B(grad_output.T, h)  # AspRelu2B_block(grad_output.T, z) #
+        grad_W2 = AspRelu2B(grad_output.T, h)
 
         grad_h2 = grad_output @ W2
         grad_z = relu2_grad_sparse_(grad_h2, h)
