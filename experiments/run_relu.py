@@ -2,10 +2,10 @@ import torch
 import torch._logging
 import math
 
-from src.layers import FFNRelu, FFNRelu_3
+from lib_sparse.layers import FFNRelu, FFNRelu_3
+from lib_sparse.bitsparse import TensorBuffer
 
 from experiments.experiment import run_step, DeepFFN_abc
-from src.bitsparse import TensorBuffer
 from experiments.utils import setup_hooks
 
 FFN_BLOCK_LAYERS = 2

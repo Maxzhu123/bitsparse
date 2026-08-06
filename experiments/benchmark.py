@@ -3,10 +3,10 @@ import time
 import torch
 from torch import Tensor
 
-from src.bitsparse import BitsparseTensor
-from src.code.functions import dense_to_tilesparse
-from src.code.bitpacking import packed_nbytes
-from src.code.triton_operators import unpack_batch_
+from bitsparse import BitsparseTensor
+from lib_sparse.code.functions import dense_to_tilesparse
+from lib_sparse.code.bitpacking import packed_nbytes
+from lib_sparse.code.triton_operators import unpack_batch_
 
 
 DEFAULT_SHAPES = ((1000, 4096), (4000, 4096), (15000, 4096))

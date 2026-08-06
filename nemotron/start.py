@@ -1,11 +1,11 @@
 import os
 import sys
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIB_SPARSE_ROOT = os.path.join(PROJECT_ROOT, "lib_sparse")
-for path in (PROJECT_ROOT, LIB_SPARSE_ROOT):
-    if path not in sys.path:
-        sys.path.append(path)
+# PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# LIB_SPARSE_ROOT = os.path.join(PROJECT_ROOT, "lib_sparse")
+# for path in (PROJECT_ROOT, LIB_SPARSE_ROOT):
+#     if path not in sys.path:
+#         sys.path.append(path)
 
 import torch
 from transformers import AutoTokenizer
@@ -14,7 +14,6 @@ from cprint import c_print
 
 from utils import print_max_memory
 from llm import NemotronHForCausalLM
-from lib_sparse.src.bitsparse import TensorBuffer
 
 # MODEL_NAME = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"
 MODEL_NAME = "nvidia/Nemotron-H-8B-Base-8K"

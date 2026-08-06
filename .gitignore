@@ -11,9 +11,7 @@ build/
 *.iml
 
 # Project — intentionally untracked
-results.tsv
-run.log
-results_*
 /torch_compile_debug/
 rsync.sh
 scripts.sh
+*.whl

@@ -2,7 +2,7 @@ import torch
 import triton
 from torch import Tensor
 
-from src.code.triton_kernels import (
+from code.triton_kernels import (
     _tile_pack_kernel,
     _compact_vals_16_kernel,
     _unpack_batch_kernel,
@@ -13,8 +13,8 @@ from src.code.triton_kernels import (
     _relu2_grad_sparse_kernel,
     _relu2_grad_sparse_15_kernel,
 )
-from src.bitsparse import RELU2_SCALE, BitsparseTensor
-from src.code.bitpacking import (
+from bitsparse import RELU2_SCALE, BitsparseTensor
+from code.bitpacking import (
     _pack_15bit_kernel,
     packed_nbytes,
     packed_storage_nbytes,
