@@ -5,8 +5,8 @@ import math
 from lib_sparse.layers import FFNRelu, FFNRelu_3
 from lib_sparse.bitsparse import TensorBuffer
 
-from experiments.experiment import run_step, DeepFFN_abc
-from experiments.utils import setup_hooks
+from .experiment import run_step, DeepFFN_abc
+from .utils import setup_hooks
 
 FFN_BLOCK_LAYERS = 2
 LAYERS = 7

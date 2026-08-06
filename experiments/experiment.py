@@ -6,7 +6,7 @@ import math
 import time
 import gc
 
-from bitsparse import RELU2_SCALE
+from lib_sparse.bitsparse import RELU2_SCALE
 
 
 # ------------------------------------------------------------------------------
