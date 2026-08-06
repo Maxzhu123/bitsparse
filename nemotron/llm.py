@@ -1,12 +1,3 @@
-"""Editable local Nemotron-H model used by start.py.
-
-This is a trimmed standalone copy of the implementation installed in the
-`optimiser` mamba environment. It keeps the paths used by the current script:
-pretrained loading, causal-LM loss/backward, and autoregressive generation.
-The NVIDIA Nano checkpoint uses mamba, attention, and MLP blocks, so the MoE
-implementation from upstream is intentionally omitted.
-"""
-
 # Copyright 2024-2025 NVIDIA Corporation and The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,7 +18,7 @@ from huggingface_hub.dataclasses import strict
 from transformers.configuration_utils import PreTrainedConfig
 from transformers.utils import logging
 from lib_sparse.layers import FFNRelu2
-from bitsparse import TensorBuffer
+from lib_sparse.bitsparse import TensorBuffer
 logger = logging.get_logger(__name__)
 
 
@@ -793,7 +784,7 @@ class NemotronHMLP(nn.Module):
             return out
         else:
             if self.config.use_ckpt:
-                return torch.utils.checkpoint.checkpoint(self._forward_ffn, x, use_reentrant=False)
+                return torch.utils.checkpoint.checkpoint(self._forward_ffn, x, use_reentrant=True)
             else:
                 return self._forward_ffn(x)
 

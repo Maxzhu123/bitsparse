@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 
-from code.bitpacking import packed_nbytes
+from .code.bitpacking import packed_nbytes
 
 # Constant for RELU^2 scaling
 RELU2_SCALE = 1

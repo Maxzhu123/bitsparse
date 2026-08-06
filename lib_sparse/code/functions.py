@@ -3,8 +3,8 @@ from typing import NamedTuple
 import torch
 from torch import Tensor
 
-from code.triton_operators import compact_vals, tile_pack
-from bitsparse import BitsparseTensor, TensorBuffer, tile_grid, BLOCK_M, BLOCK_N
+from .triton_operators import compact_vals, tile_pack
+from ..bitsparse import BitsparseTensor, TensorBuffer, tile_grid, BLOCK_M, BLOCK_N
 
 
 class _PreparedTiles(NamedTuple):

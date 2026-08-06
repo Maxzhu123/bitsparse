@@ -1,19 +1,13 @@
 import os
-import sys
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-# PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# LIB_SPARSE_ROOT = os.path.join(PROJECT_ROOT, "lib_sparse")
-# for path in (PROJECT_ROOT, LIB_SPARSE_ROOT):
-#     if path not in sys.path:
-#         sys.path.append(path)
 
 import torch
 from transformers import AutoTokenizer
 import time
 from cprint import c_print
 
-from utils import print_max_memory
-from llm import NemotronHForCausalLM
+from .utils import print_max_memory
+from .llm import NemotronHForCausalLM
 
 # MODEL_NAME = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"
 MODEL_NAME = "nvidia/Nemotron-H-8B-Base-8K"
@@ -57,7 +51,7 @@ def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
     model.train()
 
     model.config.sparse_ffn = True
-    model.config.use_ckpt = False
+    model.config.use_ckpt = True
     # sparse_data = TensorBuffer(60_000_000)
     sparse_data = None
     model.config.sparse_data = sparse_data
@@ -122,7 +116,7 @@ def main():
         MODEL_NAME, dtype=dtype, trust_remote_code=True).to(device)
     setup_hooks(model)
 
-    token_sizes = [50, 100, 200, 300, 400, 500, 700, 900, 1100, 1300, 1500, 2000] #[2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000, 6500, 7000] #
+    token_sizes = [50, 100, 200, 300, 400, 500, 700, 900, 1100, 1300, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000, 6500, 7000]
     for train_tokens in token_sizes:
         run_tests(model, tokenizer, device, train_tokens)
     # train_tokens = 500

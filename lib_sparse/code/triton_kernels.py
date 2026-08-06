@@ -19,7 +19,7 @@ of shape [BLOCK_M × BLOCK_N].  Every tile is independently compressed:
 import triton
 import triton.language as tl
 
-from code.bitpacking import load_15bit_at_indices
+from .bitpacking import load_15bit_at_indices
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Autotune configs for the hot kernels.

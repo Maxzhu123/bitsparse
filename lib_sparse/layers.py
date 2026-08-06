@@ -3,10 +3,10 @@ import torch
 from torch import Tensor
 from torch.autograd import Function
 
-from code.functions import dense_to_tilesparse
-from code.sparse_matmul import AspB, AspRelu2B
-from code.triton_operators import mask_with_bitmask_, relu2_grad_sparse_
-from bitsparse import BitsparseTensor, RELU2_SCALE
+from .code.functions import dense_to_tilesparse
+from .code.sparse_matmul import AspB, AspRelu2B
+from .code.triton_operators import mask_with_bitmask_, relu2_grad_sparse_
+from .bitsparse import BitsparseTensor, RELU2_SCALE
 if TYPE_CHECKING:
     from bitsparse import TensorBuffer
 
