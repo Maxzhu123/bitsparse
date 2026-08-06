@@ -5,6 +5,7 @@ from torch import Tensor
 
 from src.bitsparse import BitsparseTensor
 from src.code.functions import dense_to_tilesparse
+from src.code.bitpacking import packed_nbytes
 from src.code.triton_operators import unpack_batch_
 
 
@@ -46,7 +47,10 @@ def decompress(sparse: BitsparseTensor) -> Tensor:
 
 def compress_batch(tensors: list[Tensor], packed_15bit: bool) -> list[BitsparseTensor]:
     """Compress every dense tensor in a batch."""
-    return [dense_to_tilesparse(tensor, packed_15bit=packed_15bit) for tensor in tensors]
+    return [
+        dense_to_tilesparse(tensor, packed_15bit=packed_15bit)
+        for tensor in tensors
+    ]
 
 
 def decompress_batch(tensors: list[BitsparseTensor]) -> list[Tensor]:
@@ -115,9 +119,9 @@ def main() -> None:
             # Compression check
             storage_ratios = []
             for ct, original in zip(compressed, tensors):
-                storage_ratio = ct.prefix[-1].item() / (
-                    original.numel() * original.element_size()
-                )
+                nnz = ct.prefix[-1].item()
+                value_bytes = packed_nbytes(nnz) if ct.packed_15bit else nnz * original.element_size()
+                storage_ratio = value_bytes / (original.numel() * original.element_size())
                 storage_ratios.append(storage_ratio)
             storage_ratio = sum(storage_ratios) / n
 

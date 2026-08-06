@@ -13,8 +13,8 @@ LAYERS = 7
 BATCH_SIZE = 10000
 DIM = 4096
 
-BASIC_MODE = False
-PACKED_15BIT = True
+BASIC_MODE = True
+PACKED_15BIT = False
 
 class DeepFFN(DeepFFN_abc):
     handles: list

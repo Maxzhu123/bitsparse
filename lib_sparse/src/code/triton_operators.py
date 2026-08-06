@@ -1,12 +1,10 @@
 import torch
+import triton
 from torch import Tensor
 
 from src.code.triton_kernels import (
     _tile_pack_kernel,
     _compact_vals_16_kernel,
-    _compact_vals_staging_kernel,
-    _compact_vals_15_kernel,
-    _compact_vals_15_fused_kernel,
     _unpack_batch_kernel,
     _unpack_batch_15_kernel,
     _unpack_relu2_batch_kernel,
@@ -16,12 +14,11 @@ from src.code.triton_kernels import (
     _relu2_grad_sparse_15_kernel,
 )
 from src.bitsparse import RELU2_SCALE, BitsparseTensor
-
-
-# Fusion saves a launch for small grids, but its larger register footprint
-# reduces occupancy on larger ones. This cutoff is benchmarked on the supported
-# 64x64 tile format and keeps the faster implementation for each regime.
-FUSED_15BIT_MAX_TILES = 1024
+from src.code.bitpacking import (
+    _pack_15bit_kernel,
+    packed_nbytes,
+    packed_storage_nbytes,
+)
 
 
 def tile_pack(
@@ -36,53 +33,52 @@ def tile_pack(
         M, N,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES,
+        num_warps=2, num_stages=1,
     )
 
 
 def compact_vals(
-    dense: Tensor, tile_counts: Tensor, tile_prefix: Tensor,
-    vals: Tensor, vals_offset: Tensor,
+    dense: Tensor, tile_prefix: Tensor,
+    vals: Tensor | None, vals_offset: Tensor | None,
     M: int, N: int, grid_n: int, num_tiles: int,
     BLOCK_M: int, BLOCK_N: int, TILE_NUMEL: int, packed_15bit: bool,
-) -> None:
-    """Scatter positive values into raw or packed compact storage."""
+) -> tuple[Tensor, Tensor]:
+    """Compact positive values into standalone or preallocated storage."""
+    staging_numel = dense.numel()
+    if vals is None:
+        nnz = int(tile_prefix[-1].item())
+        staging_numel = nnz
+        size = packed_storage_nbytes(nnz) if packed_15bit else nnz
+        dtype = torch.uint8 if packed_15bit else dense.dtype
+        vals = torch.empty(size, device=dense.device, dtype=dtype)
+        vals_offset = torch.zeros((), device=dense.device, dtype=torch.int64)
+
     if packed_15bit:
-        raw_prefix = torch.empty(
-            num_tiles + 1, device=dense.device, dtype=torch.int32
+        # Preallocated storage uses a dense upper bound to avoid a host read.
+        raw_vals = torch.empty(staging_numel, device=dense.device, dtype=dense.dtype)
+        # prefix[0] supplies the zero staging offset.
+        _compact_vals_16_kernel[(num_tiles,)](
+            dense, tile_prefix, raw_vals, tile_prefix,
+            M, N, grid_n,
+            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+            TILE_NUMEL=TILE_NUMEL,
         )
-        torch.cumsum(tile_counts * dense.element_size(), 0, out=raw_prefix[1:])
-        raw_prefix[0] = 0
-        raw_vals = torch.empty(
-            raw_prefix[-1].item() // dense.element_size(),
-            device=dense.device,
-            dtype=dense.dtype,
-        )
-        if num_tiles <= FUSED_15BIT_MAX_TILES:
-            _compact_vals_15_fused_kernel[(num_tiles,)](
-                dense, raw_vals, raw_prefix, tile_prefix,
-                vals.view(-1).view(torch.int32), vals_offset,
-                M, N, grid_n,
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                TILE_NUMEL=TILE_NUMEL,
+        launch_bytes = packed_nbytes(staging_numel)
+        if launch_bytes:
+            _pack_15bit_kernel[
+                lambda meta: (triton.cdiv(launch_bytes, meta["BLOCK_SIZE"]),)
+            ](
+                raw_vals.view(torch.uint16), vals, vals_offset,
+                tile_prefix, num_tiles,
             )
-        else:
-            _compact_vals_staging_kernel[(num_tiles,)](
-                dense, raw_prefix, raw_vals,
-                M, N, grid_n,
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                TILE_NUMEL=TILE_NUMEL,
-            )
-            _compact_vals_15_kernel[(num_tiles,)](
-                raw_vals, raw_prefix, tile_prefix, vals.view(-1).view(torch.int32),
-                vals_offset, M, N,
-            )
-        return
+        return vals, vals_offset
     _compact_vals_16_kernel[(num_tiles,)](
         dense, tile_prefix, vals, vals_offset,
         M, N, grid_n,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=TILE_NUMEL,
     )
+    return vals, vals_offset
 
 
 def unpack_batch_(
@@ -95,13 +91,14 @@ def unpack_batch_(
     BLOCK_N = sparse.BLOCK_N
     if sparse.packed_15bit:
         _unpack_batch_15_kernel[(num_tiles_in_batch,)](
-            sparse.vals.view(-1).view(torch.int32),
+            sparse.vals.view(-1).view(torch.uint16),
             sparse.bitmask, sparse.prefix, sparse.vals_offset,
             output,
             first_m_tile, grid_n, K, batch_rows,
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
             TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
             IS_BF16=sparse.value_dtype == torch.bfloat16,
+            num_warps=4, num_stages=1,
         )
         return output
     _unpack_batch_kernel[(num_tiles_in_batch,)](
@@ -124,7 +121,7 @@ def unpack_relu2_batch_(
     BLOCK_N = sparse.BLOCK_N
     if sparse.packed_15bit:
         _unpack_relu2_batch_15_kernel[(num_tiles_in_batch,)](
-            sparse.vals.view(-1).view(torch.int32),
+            sparse.vals.view(-1).view(torch.uint16),
             sparse.bitmask, sparse.prefix, sparse.vals_offset,
             output,
             first_m_tile, grid_n, K, batch_rows,
@@ -132,6 +129,7 @@ def unpack_relu2_batch_(
             TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
             RELU2_SCALE=RELU2_SCALE,
             IS_BF16=sparse.value_dtype == torch.bfloat16,
+            num_warps=4, num_stages=1,
         )
         return output
     _unpack_relu2_batch_kernel[(num_tiles_in_batch,)](
@@ -171,7 +169,7 @@ def relu2_grad_sparse_(grad: Tensor, sparse_z: BitsparseTensor) -> Tensor:
     BLOCK_N = sparse_z.BLOCK_N
     if sparse_z.packed_15bit:
         _relu2_grad_sparse_15_kernel[(sparse_z.grid_m, sparse_z.grid_n)](
-            grad, sparse_z.vals.view(-1).view(torch.int32),
+            grad, sparse_z.vals.view(-1).view(torch.uint16),
             sparse_z.bitmask, sparse_z.prefix, sparse_z.vals_offset,
             sparse_z.shape[0], sparse_z.shape[1],
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,

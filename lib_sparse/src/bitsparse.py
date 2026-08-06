@@ -1,6 +1,8 @@
 import torch
 from torch import Tensor
 
+from src.code.bitpacking import packed_nbytes
+
 # Constant for RELU^2 scaling
 RELU2_SCALE = 1
 BLOCK_M = 64        # Rows per tile
@@ -12,9 +14,9 @@ class BitsparseTensor:
 
     ``vals`` stores positive entries in row-major tile order, ``bitmask`` marks
     nonzero locations with one bit per element, and ``prefix[t]`` gives the
-    starting byte offset of tile ``t`` in ``vals``.
+    starting logical-value offset of tile ``t`` in ``vals``.
 
-    ``vals_offset`` is an optional int64 tensor giving the starting byte offset
+    ``vals_offset`` is an optional int64 tensor giving the starting logical-value offset
     of this layer's values inside a shared ``vals`` buffer.  When ``None`` (the
     default), a zero tensor is created so the tensor is self-contained.
     """
@@ -56,7 +58,8 @@ class BitsparseTensor:
         return ((self.bitmask[:, None] >> bits) & 1).sum()
 
     def vram_size(self):
-        val_size = self.prefix[-1]
+        nnz = int(self.prefix[-1].item())
+        val_size = packed_nbytes(nnz) if self.packed_15bit else nnz * self.vals.element_size()
         bitmask_size = self.bitmask.element_size() * self.bitmask.nelement()
         prefix_size = self.prefix.element_size() * self.prefix.nelement()
         return (val_size + bitmask_size + prefix_size) / 1024 ** 2
@@ -81,8 +84,8 @@ class TensorBuffer:
 
         # Init storage tensors
         if packed_15bit:
-            self.size = (self.size + 3) // 4 * 4
-            self.vals = torch.zeros(self.size, device=self.device, dtype=torch.uint8)
+            storage_size = (self.size + 3) // 4 * 4 + 4
+            self.vals = torch.zeros(storage_size, device=self.device, dtype=torch.uint8)
         else:
             if self.size % torch.empty((), dtype=dtype).element_size() != 0:
                 raise ValueError("raw TensorBuffer size must be a multiple of dtype size")
