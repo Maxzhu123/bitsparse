@@ -23,17 +23,6 @@ from .bitpacking import load_15bit_at_indices
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Autotune configs for the hot kernels.
-#
-# Matmul, compression, and selected gather/elementwise kernels are autotuned.
-#
-# _relu2_grad_sparse_kernel is in-place/non-idempotent, so its autotune uses
-# restore_value=["grad_ptr"] to reset grad between benchmark iterations.
-#
-# BLOCK_M/BLOCK_N/TILE_* are NOT tuned: they define the BitsparseTensor format
-# itself and every kernel operating on a tensor must agree on them.
-#
-# Config sets are deliberately small and keyed only on shape dims so
-# each fixed layer shape benchmarks exactly once.
 # ═══════════════════════════════════════════════════════════════════════════════
 _MATMUL_CONFIGS = [
     triton.Config({"BLOCK_K": 32}, num_warps=8, num_stages=2),

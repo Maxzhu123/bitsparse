@@ -11,19 +11,11 @@ BLOCK_N = 64        # Columns per tile
 
 class BitsparseTensor:
     """Tile-wise bitmask sparse tensor for a dense matrix of shape ``shape``.
-
-    ``vals`` stores positive entries in row-major tile order, ``bitmask`` marks
-    nonzero locations with one bit per element, and ``prefix[t]`` gives the
-    starting logical-value offset of tile ``t`` in ``vals``.
-
-    ``vals_offset`` is an optional int64 tensor giving the starting logical-value offset
-    of this layer's values inside a shared ``vals`` buffer.  When ``None`` (the
-    default), a zero tensor is created so the tensor is self-contained.
     """
-    vals: Tensor
-    bitmask: Tensor
-    prefix: Tensor
-    vals_offset: Tensor
+    vals: Tensor            # Positive entries in row-major tile order. Can use a shared value buffer.
+    bitmask: Tensor         # One bit per element, in row-major tile order. uint8 packed dtype.
+    prefix: Tensor          # Starting logical-value offset of each tile in ``vals``. uint32 dtype.
+    vals_offset: Tensor     # Offset where values in this tensor start in vals. 0 if not using shared buffer
     BLOCK_M: int
     BLOCK_N: int
     grid_m: int
@@ -69,8 +61,8 @@ class BitsparseTensor:
 
 
 class TensorBuffer:
-    vals: Tensor
-    offset: Tensor
+    vals: Tensor        # Value tensor
+    offset: Tensor      # Next offset for where next element can go, tracking where the buffer is filled to.
 
     def __init__(self, size: int, device="cuda", dtype=torch.bfloat16,
                  packed_15bit: bool = False):
