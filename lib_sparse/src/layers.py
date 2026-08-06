@@ -17,7 +17,7 @@ class ReluLinear(Function):
     """y = relu(Wx)."""
 
     @staticmethod
-    def forward(ctx, z, W, sparse_data:TensorBuffer|None=None, packed_15bit=None):
+    def forward(ctx, z, W, sparse_data:TensorBuffer|None=None, packed_15bit: bool=False):
         """ relu(Wx) layer. """
         ctx.save_for_backward(W)
         h = z.relu_()
@@ -49,7 +49,7 @@ class ReluLinear(Function):
 class FFNRelu:
     """ FFN block with relu activation"""
     @staticmethod
-    def apply(x, W1, W2, sparse_data:TensorBuffer|None=None, packed_15bit=None):
+    def apply(x, W1, W2, sparse_data:TensorBuffer|None=None, packed_15bit: bool=False):
         z = x @ W1.T
         y = ReluLinear.apply(z, W2, sparse_data, packed_15bit)
         return y
@@ -58,7 +58,7 @@ class FFNRelu:
 class FFNRelu_3:
     """ FFN block with relu activation, 3 linear layers. """
     @staticmethod
-    def apply(x, W1, W2, W3, sparse_data:TensorBuffer|None=None, packed_15bit=None):
+    def apply(x, W1, W2, W3, sparse_data:TensorBuffer|None=None, packed_15bit: bool=False):
         z1 = x @ W1.T
         y1 = ReluLinear.apply(z1, W2, sparse_data, packed_15bit)
         y2 = ReluLinear.apply(y1, W3, sparse_data, packed_15bit)
@@ -71,7 +71,7 @@ class Relu2Linear(Function):
     """y = relu(Wx)."""
 
     @staticmethod
-    def forward(ctx, z, W, sparse_data:TensorBuffer|None, packed_15bit=None):
+    def forward(ctx, z, W, sparse_data:TensorBuffer|None, packed_15bit: bool=False):
         """ relu(Wx) layer. """
         ctx.save_for_backward(W)
         h = z.relu_()
@@ -105,7 +105,7 @@ class Relu2Linear(Function):
 
 class FFNRelu2:
     @staticmethod
-    def apply(x, W1, W2, sparse_data:TensorBuffer|None=None, packed_15bit=None):
+    def apply(x, W1, W2, sparse_data:TensorBuffer|None=None, packed_15bit: bool=False):
         """ FFN block with relu2 activation, 2 linear layers.
             x.shape = [*bs, d]
             W1.shape = [d2, d]
@@ -122,7 +122,7 @@ class FFNRelu2:
 
 class FFNRelu2_3:
     @staticmethod
-    def apply(x, W1, W2, W3, sparse_data:TensorBuffer|None=None, packed_15bit=None):
+    def apply(x, W1, W2, W3, sparse_data:TensorBuffer|None=None, packed_15bit: bool=False):
         z1 = x @ W1.T
         y1 = Relu2Linear.apply(z1, W2, sparse_data, packed_15bit)
         y2 = Relu2Linear.apply(y1, W3, sparse_data, packed_15bit)
@@ -135,7 +135,7 @@ class FFNSparse(Function):
     """Forward of FFN."""
 
     @staticmethod
-    def forward(ctx, x, W1, W2, sparse_data:TensorBuffer|None=None, packed_15bit=None):
+    def forward(ctx, x, W1, W2, sparse_data:TensorBuffer|None=None, packed_15bit: bool=False):
         ctx.save_for_backward(x, W1, W2)
         z = x @ W1.T
         h = z.relu_()
@@ -174,7 +174,7 @@ class FFNSparseRelu2(Function):
         k = 1 / sqrt(3) matches the RMS of ReLU for standard-normal inputs.
     """
     @staticmethod
-    def forward(ctx, x, W1, W2, sparse_data: TensorBuffer | None=None, packed_15bit=None):
+    def forward(ctx, x, W1, W2, sparse_data: TensorBuffer | None=None, packed_15bit: bool=False):
         bs_dims = x.shape[:-1]          # [*bs, d]
         x = x.reshape(-1, x.shape[-1])
 
@@ -213,5 +213,4 @@ class FFNSparseRelu2(Function):
             grad_x = None
         grad_W1 = grad_z.T @ x
         return grad_x, grad_W1, grad_W2, None, None
-
 

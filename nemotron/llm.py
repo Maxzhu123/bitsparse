@@ -82,6 +82,8 @@ class NemotronHConfig(PreTrainedConfig):
     # Custom
     sparse_ffn: bool = False
     sparse_data: TensorBuffer | None = None
+    use_ckpt: bool = False
+
 
     def __post_init__(self, **kwargs):
         # Backward compatibility; configs expect different names for these fields when init
@@ -778,16 +780,22 @@ class NemotronHMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
         self.act_fn = ACT2FN[config.mlp_hidden_act]
 
+    def _forward_ffn(self, x):
+        h = self.act_fn(self.up_proj(x))
+        return self.down_proj(h)
+
     def forward(self, x):
         if self.config.sparse_ffn:
             W1 = self.up_proj.weight
             W2 = self.down_proj.weight
-            out = FFNRelu2.apply(x, W1, W2, sparse_data=self.config.sparse_data)
+            out = FFNRelu2.apply(x, W1, W2, sparse_data=self.config.sparse_data, packed_15bit=True)
             #out = FFNSparseRelu2.apply(x, W1, W2, self.config.sparse_data)
             return out
         else:
-            h = self.act_fn(self.up_proj(x))
-            return self.down_proj(h)
+            if self.config.use_ckpt:
+                return torch.utils.checkpoint.checkpoint(self._forward_ffn, x, use_reentrant=False)
+            else:
+                return self._forward_ffn(x)
 
 
 def rotate_half(x):

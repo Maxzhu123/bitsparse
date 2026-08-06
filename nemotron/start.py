@@ -57,7 +57,8 @@ def calculate_loss(model: NemotronHForCausalLM, text, tokenizer, device, max_tok
 def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
     model.train()
 
-    model.config.sparse_ffn = False
+    model.config.sparse_ffn = True
+    model.config.use_ckpt = False
     # sparse_data = TensorBuffer(60_000_000)
     sparse_data = None
     model.config.sparse_data = sparse_data
@@ -65,7 +66,7 @@ def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
     c_print(f'{train_tokens=}, sparse={model.config.sparse_ffn}', color="bright_yellow")
 
     # Warmup
-    c_print("Starting Warmup", color="cyan")
+    # c_print("Starting Warmup", color="cyan")
     for _ in range(3):
         if sparse_data is not None:
             sparse_data.reset_buffer()
@@ -74,7 +75,7 @@ def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
         model.zero_grad()
 
     # Timing
-    c_print("Starting Timing Run", color="cyan")
+    # c_print("Starting Timing Run", color="cyan")
     torch.cuda.synchronize()
     st = time.perf_counter()
     for _ in range(5):
@@ -86,7 +87,7 @@ def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
     torch.cuda.synchronize()
     et = time.perf_counter()
 
-    print(f"Total Time: {1000 * (et - st) / 5:.4f} seconds")
+    print(f"Total Time: {1000 * (et - st) / 5:.4f} ms")
 
     # Record memory usage
     torch.cuda.empty_cache()
