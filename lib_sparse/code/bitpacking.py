@@ -45,11 +45,7 @@ def load_15bit_at_indices(packed_ptr, value_indices, mask, BF16: tl.constexpr):
     return values
 
 
-@triton.autotune(
-    configs=_PACK_15BIT_CONFIGS,
-    key=["numel_index"],
-    cache_results=True,
-)
+@triton.autotune(configs=_PACK_15BIT_CONFIGS, key=["numel_index"], cache_results=True)
 @triton.jit
 def _pack_15bit_kernel(
     input_ptr,
