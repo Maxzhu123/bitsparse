@@ -49,9 +49,29 @@ class ReluLinear(Function):
 class FFNRelu:
     """ FFN block with relu activation"""
     @staticmethod
-    def apply(x, W1, W2, sparse_data:TensorBuffer|None=None, packed_15bit: bool=False):
+    def apply(x, W1, W2, b1=None, b2=None,
+              sparse_data:TensorBuffer|None=None, packed_15bit: bool=False):
+        """ FFN block with relu2 activation, 2 linear layers.
+            x.shape = [*bs, d_in]
+            W1.shape = [d_ff, d_in]
+            W2.shape = [d_ff, d_out]
+            b1.shape = [d_ff]
+            b2.shape = [d_out]
+
+            out.shape = [*bs, d_out]
+        """
+        bs_dims = x.shape[:-1]          # [*bs, d_in]
+        x = x.reshape(-1, x.shape[-1])  # [batch, d_in]
+
         z = x @ W1.T
+        if b1 is not None:
+            z = z + b1
         y = ReluLinear.apply(z, W2, sparse_data, packed_15bit)
+
+        y = y.reshape(*bs_dims,  y.shape[-1])   # [*bs, d_out]
+        if b2 is not None:
+            y = y + b2
+
         return y
 
 
@@ -105,18 +125,26 @@ class Relu2Linear(Function):
 
 class FFNRelu2:
     @staticmethod
-    def apply(x, W1, W2, sparse_data:TensorBuffer|None=None, packed_15bit: bool=False):
+    def apply(x, W1, W2, b1=None, b2=None,
+              sparse_data:TensorBuffer|None=None, packed_15bit: bool=False):
         """ FFN block with relu2 activation, 2 linear layers.
-            x.shape = [*bs, d]
-            W1.shape = [d2, d]
-            W2.shape = [d3, d]
-            out.shape = [*bs, d3]
+            x.shape = [*bs, d_in]
+            W1.shape = [d_ff, d_in]
+            W2.shape = [d_ff, d_out]
+            b1.shape = [d_ff]
+            b2.shape = [d_out]
+
+            out.shape = [*bs, d_out]
         """
-        bs_dims = x.shape[:-1]          # [*bs, d]
-        x = x.reshape(-1, x.shape[-1])
-        z = x @ W1.T
-        y = Relu2Linear.apply(z, W2, sparse_data, packed_15bit)
-        y = y.reshape(*bs_dims,  y.shape[-1])
+        bs_dims = x.shape[:-1]          # [*bs, d_in]
+        x = x.reshape(-1, x.shape[-1])  # [batch, d_in]
+        z = x @ W1.T                    # [batch, d_ff]
+        if b1 is not None:
+            z = z + b1
+        y = Relu2Linear.apply(z, W2, sparse_data, packed_15bit) # [batch, d_out]
+        y = y.reshape(*bs_dims,  y.shape[-1])   # [*bs, d_out]
+        if b2 is not None:
+            y = y + b2
         return y
 
 
