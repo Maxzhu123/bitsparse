@@ -3,10 +3,6 @@ from torch import Tensor
 
 from .code.bitpacking import packed_nbytes
 
-# Constant for RELU^2 scaling
-RELU2_SCALE = 1
-BLOCK_M = 64        # Rows per tile
-BLOCK_N = 64        # Columns per tile
 
 
 class BitsparseTensor:

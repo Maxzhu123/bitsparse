@@ -15,7 +15,7 @@ BATCH_SIZE = 10000
 DIM = 4096
 
 BASIC_MODE = True
-PACK_15BIT = False
+PACK_15BIT = True
 
 class DeepFFN(DeepFFN_abc):
     handles: list
@@ -87,5 +87,5 @@ def evaluate(bs=BATCH_SIZE, layers=LAYERS):
 
 if __name__ == "__main__":
     from experiment import run_batch
-    # run_batch(evaluate, save_name="relu.csv")
-    evaluate(bs=32_000)
+    run_batch(evaluate, save_name="relu_15b.csv")
+    # evaluate(bs=32_000)

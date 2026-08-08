@@ -114,15 +114,18 @@ def _compact_vals_kernel(
     tile_prefix_ptr,    # input:  uint32[n_tiles+1] logical value offsets
     vals_out_ptr,       # output: compact fp16/bf16 buffer for positive values
     layer_offset_ptr,   # input:  int64[1] global logical value offset
-    M, N, grid_n,       # dimensions and tile grid
+    first_tile, M, N, grid_n,  # chunk start, dimensions, and tile grid
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     TILE_NUMEL: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    base = tl.load(tile_prefix_ptr + pid) + tl.load(layer_offset_ptr)
+    tile_id = first_tile + pid
+    base = (tl.load(tile_prefix_ptr + tile_id)
+            - tl.load(tile_prefix_ptr + first_tile)
+            + tl.load(layer_offset_ptr))
 
-    tile_m = pid // grid_n
-    tile_n = pid % grid_n
+    tile_m = tile_id // grid_n
+    tile_n = tile_id % grid_n
 
     rm = tile_m * BLOCK_M + tl.arange(0, BLOCK_M)
     rn = tile_n * BLOCK_N + tl.arange(0, BLOCK_N)

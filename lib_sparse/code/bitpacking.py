@@ -45,26 +45,37 @@ def load_15bit_at_indices(packed_ptr, value_indices, mask, BF16: tl.constexpr):
     return values
 
 
-@triton.autotune(configs=_PACK_15BIT_CONFIGS, key=["numel_index"], cache_results=True)
+@triton.autotune(configs=_PACK_15BIT_CONFIGS, key=["num_tiles"], cache_results=True)
 @triton.jit
 def _pack_15bit_kernel(
     input_ptr,
     output_ptr,
     output_offset_ptr,
-    numel_ptr,
-    numel_index,
+    tile_prefix_ptr,
+    first_tile,
+    num_tiles,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Pack contiguous 16-bit values at a byte-aligned logical buffer offset."""
-    numel = tl.load(numel_ptr + numel_index).to(tl.uint32)
-    compressed_numel = (numel // 8) * 15 + ((numel % 8) * 15 + 7) // 8
-    output_offsets = (tl.program_id(0).to(tl.uint32) * BLOCK_SIZE
-                      + tl.arange(0, BLOCK_SIZE).to(tl.uint32))
-    output_mask = output_offsets < compressed_numel
-    within_group = output_offsets % 15
-    input_indices = ((output_offsets // 15) * 8
-                     + (within_group * 8) // 15)
-    bit_offsets = (within_group * 8) % 15
+    """Pack a tile chunk into an arbitrary position in the 15-bit stream."""
+    prefix_start = tl.load(tile_prefix_ptr + first_tile).to(tl.int64)
+    prefix_end = tl.load(tile_prefix_ptr + first_tile + num_tiles).to(tl.int64)
+    numel = prefix_end - prefix_start
+
+    logical_start = tl.load(output_offset_ptr).to(tl.int64) + prefix_start
+    start_bit = logical_start * 15
+    end_bit = start_bit + numel * 15
+    first_byte = start_bit // 8
+    end_byte = (end_bit + 7) // 8
+
+    byte_offsets = (tl.program_id(0).to(tl.int64) * BLOCK_SIZE
+                    + tl.arange(0, BLOCK_SIZE).to(tl.int64))
+    output_mask = byte_offsets < (end_byte - first_byte)
+    output_bytes = first_byte + byte_offsets
+
+    relative_bit = output_bytes * 8 - start_bit
+    source_bit = tl.maximum(relative_bit, 0)
+    input_indices = source_bit // 15
+    bit_offsets = source_bit % 15
 
     value0 = tl.load(
         input_ptr + input_indices,
@@ -77,11 +88,18 @@ def _pack_15bit_kernel(
         other=0,
     ).to(tl.uint32)
     packed = (value0 >> bit_offsets) | (value1 << (15 - bit_offsets))
+    packed = (packed << tl.maximum(-relative_bit, 0)) & 0xFF
 
-    # Packed activations start at multiples of eight logical values: eight
-    # 15-bit values occupy exactly fifteen bytes. Standalone storage supplies
-    # a zero offset through the same path.
-    logical_offset = tl.load(output_offset_ptr)
-    output_base = (logical_offset // 8) * 15
-    tl.store(output_ptr + output_base + output_offsets, packed & 0xFF,
-             mask=output_mask)
+    byte_start_bit = output_bytes * 8
+    valid_lo = tl.minimum(tl.maximum(start_bit - byte_start_bit, 0), 8)
+    valid_hi = tl.minimum(tl.maximum(end_bit - byte_start_bit, 0), 8)
+    valid_bits = ((1 << valid_hi) - 1) & ~((1 << valid_lo) - 1)
+
+    boundary = valid_bits != 0xFF
+    old = tl.load(
+        output_ptr + output_bytes,
+        mask=output_mask & boundary,
+        other=0,
+    ).to(tl.uint32)
+    merged = (old & ~valid_bits) | (packed & valid_bits)
+    tl.store(output_ptr + output_bytes, merged, mask=output_mask)

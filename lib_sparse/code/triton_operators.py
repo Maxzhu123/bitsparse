@@ -13,7 +13,8 @@ from .triton_kernels import (
     _relu2_grad_sparse_kernel,
     _relu2_grad_sparse_15_kernel,
 )
-from ..bitsparse import RELU2_SCALE, BitsparseTensor
+from ..bitsparse import BitsparseTensor
+from config import RELU2_SCALE, _PACK_15BIT_CHUNK_TILES
 from .bitpacking import (
     _pack_15bit_kernel,
     packed_nbytes,
@@ -46,7 +47,8 @@ def compact_vals(
     """ Compact positive values into standalone or preallocated storage.
         Supports 15-bit packing and preallocated vals buffer. """
     staging_numel = dense.numel()
-    if vals is None:
+    standalone = vals is None
+    if standalone:
         nnz = int(tile_prefix[-1].item())
         staging_numel = nnz
         size = packed_storage_nbytes(nnz) if pack_15bit else nnz
@@ -55,28 +57,53 @@ def compact_vals(
         vals_offset = torch.zeros((), device=dense.device, dtype=torch.int64)
 
     if pack_15bit:
-        # Preallocated storage uses a dense upper bound to avoid a host read.
-        raw_vals = torch.empty(staging_numel, device=dense.device, dtype=dense.dtype)
-        # prefix[0] supplies the zero staging offset.
-        _compact_vals_kernel[(num_tiles,)](
-            dense, tile_prefix, raw_vals, tile_prefix,
-            M, N, grid_n,
-            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-            TILE_NUMEL=TILE_NUMEL,
-        )
-        launch_bytes = packed_nbytes(staging_numel)
-        _pack_15bit_kernel[
-            lambda meta: (triton.cdiv(launch_bytes, meta["BLOCK_SIZE"]),)
-        ](
-            raw_vals.view(torch.uint16), vals, vals_offset,
-            tile_prefix, num_tiles,
-        )
+        chunk_tiles = min(num_tiles, _PACK_15BIT_CHUNK_TILES)
+        chunk_numels = None
+        if standalone:
+            # Prefix boundaries give exact chunk sizes after the sync above.
+            prefix_ends = [0]
+            if chunk_tiles < num_tiles:
+                prefix_ends.extend(
+                    tile_prefix[chunk_tiles:num_tiles:chunk_tiles].tolist()
+                )
+            prefix_ends.append(staging_numel)
+            chunk_numels = [
+                end - start for start, end in zip(prefix_ends, prefix_ends[1:])
+            ]
+            # Reuse one workspace sized for the largest actual chunk.
+            workspace_numel = max(chunk_numels)
+        else:
+            # Keep preallocated buffers asynchronous with a dense upper bound.
+            workspace_numel = min(staging_numel, chunk_tiles * TILE_NUMEL)
+        raw_vals = torch.empty(workspace_numel, device=dense.device, dtype=dense.dtype)
+
+        for chunk_index, first_tile in enumerate(range(0, num_tiles, chunk_tiles)):
+            tiles_in_chunk = min(chunk_tiles, num_tiles - first_tile)
+            # Compact to workspace offset zero, then append to the packed stream.
+            _compact_vals_kernel[(tiles_in_chunk,)](
+                dense, tile_prefix, raw_vals, tile_prefix,
+                first_tile, M, N, grid_n,
+                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+                TILE_NUMEL=TILE_NUMEL,
+            )
+            launch_numel = (
+                chunk_numels[chunk_index]
+                if chunk_numels is not None
+                else tiles_in_chunk * TILE_NUMEL
+            )
+            launch_bytes = packed_nbytes(launch_numel) + 1
+            _pack_15bit_kernel[
+                lambda meta: (triton.cdiv(launch_bytes, meta["BLOCK_SIZE"]),)
+            ](
+                raw_vals.view(torch.uint16), vals, vals_offset,
+                tile_prefix, first_tile, tiles_in_chunk,
+            )
         return vals, vals_offset
 
     # Normal version version
     _compact_vals_kernel[(num_tiles,)](
         dense, tile_prefix, vals, vals_offset,
-        M, N, grid_n,
+        0, M, N, grid_n,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=TILE_NUMEL,
     )
