@@ -287,21 +287,17 @@ class FFN(Function):
 # ------------------------------------------------------------------------------
 # Sparse FFN base implementation
 # ------------------------------------------------------------------------------
-class DeepFFN_abc(nn.Module):
+class FFNReluABC(nn.Module):
     """Stack of residual FFN layers ``x <- x + FFN(x)`` for benchmarking."""
 
-    def __init__(self, dtype, layers, sp_blocks, hdim, block_layers=2, ckpt=False):
+    def __init__(self, dtype, layers, sp_blocks, hdim):
         super().__init__()
         G = torch.Generator(device="cuda").manual_seed(0)
-        self.block_layers = block_layers
         self.W1s, self.W2s, self.W3s = nn.ParameterList(), nn.ParameterList(), nn.ParameterList()
         for _ in range(layers):
-            if self.block_layers == 2:
-                W1, W2 = gen_params(hdim, G, dtype=dtype)
-                self.W1s.append(nn.Parameter(W1))
-                self.W2s.append(nn.Parameter(W2))
-            else:
-                pass
+            W1, W2 = gen_params(hdim, G, dtype=dtype)
+            self.W1s.append(nn.Parameter(W1))
+            self.W2s.append(nn.Parameter(W2))
         self.sp_blocks = sp_blocks
         # total_params = sum(p.numel() for p in self.parameters())
         # print(f'Model: {total_params = }, size={total_params * 2 // (1024 * 1024)} MB')
@@ -309,32 +305,24 @@ class DeepFFN_abc(nn.Module):
     # @torch.compile
     def forward_base(self, x):
         """Run the dense baseline on ``x[B, D]`` through all residual layers."""
-        if self.block_layers == 2:
-            for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
-                x_inner = F.rms_norm(x, x.shape[1:])
-                if i < self.sp_blocks:
-                    x = x + FFN.apply_ckpt(x_inner, W1, W2)
-                else:
-                    x = x + FFN.apply(x_inner, W1, W2)
-        else:
-            pass
+        for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
+            x_inner = F.rms_norm(x, x.shape[1:])
+            if i < self.sp_blocks:
+                x = x + FFN.apply_ckpt(x_inner, W1, W2)
+            else:
+                x = x + FFN.apply(x_inner, W1, W2)
         return x
 
 
-class FFN_relu2_abc(nn.Module):
-    def __init__(self, dtype, sp_blocks, layers=12, hidm=4096, block_layers=2):
+class FFNRelu2ABC(nn.Module):
+    def __init__(self, dtype, sp_blocks, layers=12, hidm=4096):
         super().__init__()
         G = torch.Generator(device="cuda").manual_seed(0)
-        self.block_layers = block_layers
         self.W1s, self.W2s, self.W3s = nn.ParameterList(), nn.ParameterList(), nn.ParameterList()
         for _ in range(layers):
-            if self.block_layers == 2:
-                W1, W2 = gen_params(hidm, G, dtype=dtype)
-                self.W1s.append(nn.Parameter(W1))
-                self.W2s.append(nn.Parameter(W2))
-            else:
-                pass
-
+            W1, W2 = gen_params(hidm, G, dtype=dtype)
+            self.W1s.append(nn.Parameter(W1))
+            self.W2s.append(nn.Parameter(W2))
         self.sp_blocks = sp_blocks
 
     def forward_base(self, x):
