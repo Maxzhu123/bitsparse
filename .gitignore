@@ -16,6 +16,4 @@ rsync.sh
 scripts.sh
 *.whl
 *.pt
-nanogpt/data/
-/nanogpt/data/
-*.bin
+nanogpt/data/fineweb10B/

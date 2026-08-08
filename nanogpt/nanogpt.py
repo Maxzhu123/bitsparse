@@ -70,23 +70,34 @@ class MLP(nn.Module):
         self,
         dim: int,
         layer_num: int,
+        cfg: dict,
     ):
         super().__init__()
         self.layer_num = layer_num
+        self.cfg = cfg
         hdim = 4 * dim
         self.fc = Linear(dim, hdim)
         self.proj = Linear(hdim, dim)
 
-    def forward(self, x: Tensor):
+    def _forward_basic(self, x: Tensor):
         x = self.fc(x)
         x = x.relu().square()
         x = self.proj(x)
         return x
-        # W1 = self.fc.weight.type_as(x)
-        # W2 = self.proj.weight.type_as(x)
-        # b1 = self.fc.bias.type_as(x)
-        # b2 = self.proj.bias.type_as(x)
-        # return FFNRelu2.apply(x, W1, W2, b1=b1, b2=b2)
+
+    def forward(self, x: Tensor):
+
+        if self.cfg['bitsparse']:
+            W1 = self.fc.weight.type_as(x)
+            W2 = self.proj.weight.type_as(x)
+            b1 = self.fc.bias.type_as(x)
+            b2 = self.proj.bias.type_as(x)
+            return FFNRelu2.apply(x, W1, W2, b1=b1, b2=b2, packed_15bit=self.cfg['packed_15bit'])
+        else:
+            if self.cfg['checkpoint']:
+                return torch.utils.checkpoint.checkpoint(self._forward_basic, x)
+            else:
+                return self._forward_basic(x)
 
 
 class Block(nn.Module):
@@ -94,10 +105,11 @@ class Block(nn.Module):
         self,
         dim: int,
         layer_num: int,
+        cfg: dict,
     ):
         super().__init__()
         self.attn = CausalSelfAttention(dim)
-        self.mlp = MLP(dim, layer_num)
+        self.mlp = MLP(dim, layer_num, cfg)
         self.norm1 = RMSNorm(dim)
         self.norm2 = RMSNorm(dim)
 
@@ -108,16 +120,11 @@ class Block(nn.Module):
 
 
 class GPT(nn.Module):
-    def __init__(
-        self,
-        vocab_size: int,
-        num_layers: int,
-        model_dim: int,
-    ):
+    def __init__(self, vocab_size: int, num_layers: int, model_dim: int, cfg: dict):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, model_dim).bfloat16()
         self.blocks = nn.ModuleList([
-            Block(model_dim, layer_num)
+            Block(model_dim, layer_num, cfg)
             for layer_num in range(num_layers)
         ])
         self.proj = Linear(model_dim, vocab_size)

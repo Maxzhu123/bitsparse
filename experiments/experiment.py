@@ -279,7 +279,7 @@ class DeepFFN_abc(nn.Module):
             raise NotImplementedError
 
         total_params = sum(p.numel() for p in self.parameters())
-        print(f'Model: {total_params = }, size={total_params * 2 // (1024 * 1024)} MB')
+        # print(f'Model: {total_params = }, size={total_params * 2 // (1024 * 1024)} MB')
 
     # @torch.compile
     def forward_base(self, x):

@@ -29,12 +29,11 @@ class DeepFFN(FFN_relu2_abc):
         if self.block_layers == 2:
             for W1, W2 in zip(self.W1s, self.W2s):
                 x_inner = F.rms_norm(x, x.shape[1:])
-                x = x + FFNRelu2.apply(x_inner, W1, W2, buffer, PACKED_15BIT)
+                x = x + FFNRelu2.apply(x_inner, W1, W2, sparse_data=buffer, packed_15bit=PACKED_15BIT)
         else:
             for W1, W2, W3 in zip(self.W1s, self.W2s, self.W3s):
                 x_inner = F.rms_norm(x, x.shape[1:])
-                x = x + FFNRelu2_3.apply(x_inner, W1, W2, W3, buffer, PACKED_15BIT)
-
+                x = x + FFNRelu2_3.apply(x_inner, W1, W2, W3, sparse_data=buffer, packed_15bit=PACKED_15BIT)
         return x
 
 
@@ -71,19 +70,16 @@ def evaluate():
     print(f"VRAM allocated by tensors: {vram:.2f} MB")
     print(f'Total time: {avg_time:.2f} ms')
 
-    tracking = tracking * 1e3
-    tracking_dn = tracking_dn * 1e3
     print(f'{tracking_dn = }')
     print(f'{tracking = }')
 
-    if not torch.allclose(tracking, tracking_dn, atol=3e-4, rtol=3e-4):
-
-        torch.testing.assert_close(tracking, tracking_dn, atol=3e-4, rtol=3e-4)
+    if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
+        torch.testing.assert_close(tracking, tracking_dn, atol=3e-6, rtol=3e-6)
         assert vram < vram_dn * 1.1
 
 
 def run_base():
-    torch.set_printoptions(precision=10)
+    torch.set_printoptions(precision=7)
     torch.set_float32_matmul_precision("high")
     torch.manual_seed(0)
     torch._logging.set_logs(graph_breaks=True)

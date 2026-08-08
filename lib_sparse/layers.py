@@ -49,7 +49,7 @@ class ReluLinear(Function):
 class FFNRelu:
     """ FFN block with relu activation"""
     @staticmethod
-    def apply(x, W1, W2, b1=None, b2=None,
+    def apply(x, W1, W2, b1=None, b2=None, *,
               sparse_data:TensorBuffer|None=None, packed_15bit: bool=False):
         """ FFN block with relu2 activation, 2 linear layers.
             x.shape = [*bs, d_in]
@@ -71,7 +71,6 @@ class FFNRelu:
         y = y.reshape(*bs_dims,  y.shape[-1])   # [*bs, d_out]
         if b2 is not None:
             y = y + b2
-
         return y
 
 
@@ -125,7 +124,7 @@ class Relu2Linear(Function):
 
 class FFNRelu2:
     @staticmethod
-    def apply(x, W1, W2, b1=None, b2=None,
+    def apply(x, W1, W2, b1=None, b2=None, *,
               sparse_data:TensorBuffer|None=None, packed_15bit: bool=False):
         """ FFN block with relu2 activation, 2 linear layers.
             x.shape = [*bs, d_in]

@@ -16,13 +16,12 @@ from nanogpt import GPT
 
 
 LOG_DIR = Path("logs/2026-07-04_00-06-23")
-RESULTS_PATH = LOG_DIR / "validation_results_basic.csv"
+RESULTS_PATH = LOG_DIR / "test.csv"
 DATA_PATTERN = "data/fineweb10B/fineweb_val_*.bin"
 DATA_ROOT = Path.cwd()
 SEQUENCES_PER_BATCH = 4
 EVAL_STEPS = 64
 WARMUP_STEPS = 4
-COMPILE = False
 
 
 def get_state_dict(checkpoint_path: Path) -> dict[str, Tensor]:
@@ -113,12 +112,10 @@ def evaluate_checkpoint(
     model = GPT(
         vocab_size=vocab_size,
         num_layers=num_layers,
-        model_dim=model_dim,
+        model_dim=model_dim, cfg={"bitsparse": False, "packed_15bit": True, "checkpoint": True},
     )
     model.load_state_dict(state_dict)
     model.cuda()
-    if COMPILE:
-        model.compile(dynamic=False)
 
     loss, avg_time, peak_memory = evaluate(
         model,
