@@ -99,11 +99,11 @@ def evaluate(bs=BATCH_SIZE, layers=LAYERS, sp_blocks=LAYERS):
         print(f"{tracking = }")
         torch.testing.assert_close(tracking, tracking_dn, atol=3e-6, rtol=3e-6)
 
-    return vram_dn, avg_time_dn, vram, avg_time, vram, avg_time_15bit
+    return vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit
 
 
 if __name__ == "__main__":
     from experiment import run_batch, run_layers
-    run_batch(evaluate, save_name="relu2.csv")
-    # run_layers(evaluate, bs=16_000, save_name="relu2_layers.csv")
-    # evaluate(bs=16_000)
+    run_batch(evaluate, save_name="relu2_sparser.csv")
+    run_layers(evaluate, bs=16_000, save_name="relu2_sparser_layers.csv")
+    # evaluate(bs=16_000, sp_blocks=0)
