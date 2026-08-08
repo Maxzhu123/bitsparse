@@ -21,15 +21,17 @@ def run_step(x, model, buffer=None, sparse=False, steps=1):
     start = time.perf_counter()
 
     for _ in range(steps):
-        torch.cuda.reset_peak_memory_stats("cuda")
-        model.zero_grad()
         x.grad = None
+        model.zero_grad()
+        torch.cuda.reset_peak_memory_stats("cuda")
         if sparse:
             y = model.forward(x, buffer)
         else:
             y = model.forward_base(x)
-        loss = y.mean() #(y - x).pow(2).mean()
+        loss = (y - x).abs().mean()
+        del y
         loss.backward()
+        loss.detach()
 
     torch.cuda.synchronize()
     allocated = torch.cuda.max_memory_allocated("cuda") / 1024 ** 2
@@ -37,12 +39,13 @@ def run_step(x, model, buffer=None, sparse=False, steps=1):
     avg_time = (end - start) * 1000 / steps
 
     # Get gradients
-    tracking = [loss.detach().cpu(), x.grad.std().cpu()]
-    for n, p in model.named_parameters():
-        if p.grad is not None:
-            tracking.append(p.grad.std().cpu())
-    tracking = torch.stack(tracking) * 1e3
-    x.grad = None
+    with torch.no_grad():
+        tracking = [loss.detach().cpu(), x.grad.std().cpu()]
+        for n, p in model.named_parameters():
+            if p.grad is not None:
+                tracking.append(p.grad.std().cpu())
+        tracking = torch.stack(tracking) * 1e3
+        x.grad = None
 
     return tracking, allocated, avg_time
 
@@ -278,7 +281,7 @@ class DeepFFN_abc(nn.Module):
         else:
             raise NotImplementedError
 
-        total_params = sum(p.numel() for p in self.parameters())
+        # total_params = sum(p.numel() for p in self.parameters())
         # print(f'Model: {total_params = }, size={total_params * 2 // (1024 * 1024)} MB')
 
     # @torch.compile

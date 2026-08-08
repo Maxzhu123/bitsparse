@@ -10,7 +10,7 @@ from lib_sparse.code.triton_operators import unpack_batch_
 
 
 DEFAULT_SHAPES = ((1000, 4096), (4000, 4096), (15000, 4096))
-PACK_15BIT = True
+PACK_15BIT = False
 
 
 def generate_data(
@@ -120,7 +120,7 @@ def main() -> None:
             storage_ratios = []
             for ct, original in zip(compressed, tensors):
                 nnz = ct.prefix[-1].item()
-                value_bytes = packed_nbytes(nnz) if ct.pack_15bit else nnz * original.element_size()
+                value_bytes = ct.vram_size() #packed_nbytes(nnz) if ct.pack_15bit else nnz * original.element_size()
                 storage_ratio = value_bytes / (original.numel() * original.element_size())
                 storage_ratios.append(storage_ratio)
             storage_ratio = sum(storage_ratios) / n

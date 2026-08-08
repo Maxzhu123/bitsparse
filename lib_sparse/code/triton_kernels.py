@@ -109,7 +109,7 @@ def _tile_pack_kernel(
     cache_results=True,
 )
 @triton.jit
-def _compact_vals_16_kernel(
+def _compact_vals_kernel(
     dense_ptr,          # input:  dense X ∈ R^{M×N}
     tile_prefix_ptr,    # input:  uint32[n_tiles+1] logical value offsets
     vals_out_ptr,       # output: compact fp16/bf16 buffer for positive values
@@ -266,6 +266,7 @@ def _unpack_relu2_batch_kernel(
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
 
 
+@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows"])
 @triton.jit
 def _unpack_batch_15_kernel(
     vals_words_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
@@ -286,6 +287,7 @@ def _unpack_batch_15_kernel(
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
 
 
+@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows"])
 @triton.jit
 def _unpack_relu2_batch_15_kernel(
     vals_words_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,

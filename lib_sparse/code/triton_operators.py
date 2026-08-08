@@ -4,7 +4,7 @@ from torch import Tensor
 
 from .triton_kernels import (
     _tile_pack_kernel,
-    _compact_vals_16_kernel,
+    _compact_vals_kernel,
     _unpack_batch_kernel,
     _unpack_batch_15_kernel,
     _unpack_relu2_batch_kernel,
@@ -57,7 +57,7 @@ def compact_vals(
         # Preallocated storage uses a dense upper bound to avoid a host read.
         raw_vals = torch.empty(staging_numel, device=dense.device, dtype=dense.dtype)
         # prefix[0] supplies the zero staging offset.
-        _compact_vals_16_kernel[(num_tiles,)](
+        _compact_vals_kernel[(num_tiles,)](
             dense, tile_prefix, raw_vals, tile_prefix,
             M, N, grid_n,
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
@@ -72,7 +72,7 @@ def compact_vals(
                 tile_prefix, num_tiles,
             )
         return vals, vals_offset
-    _compact_vals_16_kernel[(num_tiles,)](
+    _compact_vals_kernel[(num_tiles,)](
         dense, tile_prefix, vals, vals_offset,
         M, N, grid_n,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
@@ -98,7 +98,6 @@ def unpack_batch_(
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
             TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
             IS_BF16=sparse.value_dtype == torch.bfloat16,
-            num_warps=4, num_stages=1,
         )
         return output
     _unpack_batch_kernel[(num_tiles_in_batch,)](
@@ -129,7 +128,6 @@ def unpack_relu2_batch_(
             TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
             RELU2_SCALE=RELU2_SCALE,
             IS_BF16=sparse.value_dtype == torch.bfloat16,
-            num_warps=4, num_stages=1,
         )
         return output
     _unpack_relu2_batch_kernel[(num_tiles_in_batch,)](

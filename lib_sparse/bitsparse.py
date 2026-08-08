@@ -54,7 +54,7 @@ class BitsparseTensor:
         val_size = packed_nbytes(nnz) if self.pack_15bit else nnz * self.vals.element_size()
         bitmask_size = self.bitmask.element_size() * self.bitmask.nelement()
         prefix_size = self.prefix.element_size() * self.prefix.nelement()
-        return (val_size + bitmask_size + prefix_size) / 1024 ** 2
+        return val_size + bitmask_size + prefix_size
 
     def sparsity_ratio(self):
         return 1 - self.nnz() / (self.shape[0] * self.shape[1])
@@ -88,18 +88,6 @@ class TensorBuffer:
     def reset_buffer(self):
         """ Set offset tensor inside main training loop, since this needs to be consistent. """
         self.offset = torch.zeros(1, device=self.device, dtype=torch.int64)
-
-    def to_state(self):
-        """ Returns state in current buffer, decomposed into its objects for reloading. Useful for torch ops. """
-        return self.size, self.device, self.dtype, self.pack_15bit, self.vals, self.offset
-
-    @staticmethod
-    def from_state(size, device, dtype, pack_15bit, vals, offset) -> TensorBuffer:
-        """ Creates a TensorBuffer instance from its state. """
-        buffer = TensorBuffer(size, device, dtype, pack_15bit)
-        buffer.vals = vals
-        buffer.offset = offset
-        return buffer
 
 
 def tile_grid(M: int, N: int, BLOCK_M: int, BLOCK_N: int) -> tuple[int, int, int, int, int]:

@@ -59,10 +59,6 @@ def dense_to_tilesparse(
         vals = None
         vals_offset = None
     else:
-        if sparse_data.dtype != dense.dtype:
-            raise ValueError("TensorBuffer dtype must match the dense tensor dtype")
-        if sparse_data.pack_15bit != pack_15bit:
-            raise ValueError("pack_15bit must match the TensorBuffer encoding")
         vals = sparse_data.vals
         if pack_15bit:
             # Eight logical values occupy exactly fifteen bytes. Aligning each

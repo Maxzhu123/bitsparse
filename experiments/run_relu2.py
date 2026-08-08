@@ -33,8 +33,6 @@ class DeepFFN(FFN_relu2_abc):
             for W1, W2, W3 in zip(self.W1s, self.W2s, self.W3s):
                 x_inner = F.rms_norm(x, x.shape[1:])
                 x = x + FFNRelu2_3.apply(x_inner, W1, W2, W3, sparse_data=buffer, pack_15bit=PACK_15BIT)
-
-        exit(7)
         return x
 
 
@@ -105,5 +103,5 @@ def run_batch():
 
 
 if __name__ == "__main__":
-    # run_batch()
-    evaluate(bs=32_000)
+    run_batch()
+    # evaluate(bs=32_000)
