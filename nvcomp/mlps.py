@@ -1,9 +1,6 @@
 import torch
 from torch import Tensor
 from torch.autograd import Function
-from typing import Callable
-
-from trys import compress_tensor, decompress_tensor
 
 
 class ReluLinear(Function):
@@ -22,7 +19,6 @@ class ReluLinear(Function):
         return y
 
     @staticmethod
-    @torch.compiler.disable
     def backward(ctx, grad_output: Tensor):
         """Compute gradients."""
         compressor = ctx.compressor

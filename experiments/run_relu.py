@@ -1,13 +1,8 @@
-import torch
 import torch.nn.functional as F
-import torch._logging
-import math
 
 from lib_sparse.layers import FFNRelu, FFNRelu_3
 from lib_sparse.bitsparse import TensorBuffer
-
-from experiment import run_step, DeepFFN_abc, FFN
-from utils import setup_hooks
+from experiment import DeepFFN_abc, FFN
 
 FFN_BLOCK_LAYERS = 2
 LAYERS = 8
@@ -17,7 +12,8 @@ DIM = 4096
 CKPT = True
 BASIC_MODE = True
 
-class DeepFFN(DeepFFN_abc):
+
+class FFMReluModel(DeepFFN_abc):
     handles: list
 
     def __init__(self, layers, sp_blocks, dtype, ckpt=CKPT):
@@ -44,73 +40,10 @@ class DeepFFN(DeepFFN_abc):
         return x
 
 
-def evaluate(bs=BATCH_SIZE, layers=LAYERS, sp_blocks=LAYERS):
-    """Build the benchmark model, run warmup and timed steps, and print memory results."""
-    # Setup parameters
-    dtype = torch.bfloat16
-    G = torch.Generator(device="cuda").manual_seed(0)
-    x = torch.randn(bs, DIM, dtype=dtype, device="cuda", generator=G, requires_grad=True)
-
-    # Our model
-    model = DeepFFN(layers, sp_blocks, dtype=dtype)
-    # if not BASIC_MODE:
-    setup_hooks(model)
-
-    # 1) Run baseline
-    run_step(x, model, sparse=False, steps=2)
-    tracking_dn, vram_dn, avg_time_dn = run_step(x, model, sparse=False, steps=5)
-    print(f"Baseline: {vram_dn = :.0f} MB, avg_time = {avg_time_dn:.2f} ms")
-
-    # 2) Setup sparse buffer and run model (in basic mode layers allocate on-the-fly)
-    buffer = None
-    if not BASIC_MODE:
-        hdim_expanded = math.floor(DIM * 5.25)
-        buffer_scale = 0.55
-        value_capacity = int(bs * hdim_expanded * layers * buffer_scale)
-        bits_per_value = 16
-        buffer_size = (value_capacity * bits_per_value + 7) // 8
-        buffer = TensorBuffer(
-            buffer_size, dtype=dtype, device="cuda", pack_15bit=False
-        )
-
-    run_step(x, model, buffer, sparse=True, steps=2)
-    tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, pack_15bit=False, steps=5)
-    print(f"Compressed: {vram = :.0f} MB, avg_time = {avg_time:.2f} ms")
-    # Check correctness
-    if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
-        print("Predicted values are different.")
-        print(f"{tracking_dn = }")
-        print(f"{tracking = }")
-        torch.testing.assert_close(tracking, tracking_dn, atol=3e-6, rtol=3e-6)
-
-    # 3) Run with 15bit storage
-    buffer = None
-    if not BASIC_MODE:
-        hdim_expanded = math.floor(DIM * 5.25)
-        buffer_scale = 0.55
-        value_capacity = int(bs * hdim_expanded * layers * buffer_scale)
-        bits_per_value = 15
-        buffer_size = (value_capacity * bits_per_value + 7) // 8
-        buffer = TensorBuffer(
-            buffer_size, dtype=dtype, device="cuda", pack_15bit=True
-        )
-
-    run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=3)
-    tracking, vram_15bit, avg_time_15bit = run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=1)
-    print(f"Compressed 15bit: {vram_15bit = :.0f} MB, avg_time = {avg_time_15bit:.2f} ms")
-    # Check correctness
-    if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
-        print("Predicted values are different.")
-        print(f"{tracking_dn = }")
-        print(f"{tracking = }")
-        torch.testing.assert_close(tracking, tracking_dn, atol=3e-6, rtol=3e-6)
-
-
-    return vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit
-
 
 if __name__ == "__main__":
     from experiment import run_batch, run_layers
-    run_batch(evaluate, save_name="relu_sparser.csv")
-    run_layers(evaluate, bs=16_000, save_name="relu_sparser_layers.csv")
-    # evaluate(bs=16_000, sp_blocks=0)
+
+    run_batch(FFMReluModel, save_name="relu2_sparser.csv")
+    run_layers(FFMReluModel, bs=16_000, save_name="relu2_sparser_layers.csv")
+    # evaluate(FFMReluModel, bs=16_000, sp_blocks=0)
