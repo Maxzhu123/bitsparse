@@ -15,12 +15,11 @@ BATCH_SIZE = 10000
 DIM = 4096
 
 BASIC_MODE = True
-PACKED_15BIT = True
-
+PACK_15BIT = True
 
 class DeepFFN(FFN_relu2_abc):
-    def __init__(self, dtype):
-        super().__init__(dtype, LAYERS, DIM, FFN_BLOCK_LAYERS)
+    def __init__(self, layers, dtype):
+        super().__init__(dtype, layers, DIM, FFN_BLOCK_LAYERS)
 
     def forward(self, x, buffer: TensorBuffer | None = None):
         """Run the sparse-activation FFN on ``x[B, D]`` through all residual layers."""
@@ -29,62 +28,82 @@ class DeepFFN(FFN_relu2_abc):
         if self.block_layers == 2:
             for W1, W2 in zip(self.W1s, self.W2s):
                 x_inner = F.rms_norm(x, x.shape[1:])
-                x = x + FFNRelu2.apply(x_inner, W1, W2, sparse_data=buffer, packed_15bit=PACKED_15BIT)
+                x = x + FFNRelu2.apply(x_inner, W1, W2, sparse_data=buffer, pack_15bit=PACK_15BIT)
         else:
             for W1, W2, W3 in zip(self.W1s, self.W2s, self.W3s):
                 x_inner = F.rms_norm(x, x.shape[1:])
-                x = x + FFNRelu2_3.apply(x_inner, W1, W2, W3, sparse_data=buffer, packed_15bit=PACKED_15BIT)
+                x = x + FFNRelu2_3.apply(x_inner, W1, W2, W3, sparse_data=buffer, pack_15bit=PACK_15BIT)
+
+        exit(7)
         return x
 
 
-def evaluate():
+def evaluate(bs=BATCH_SIZE, layers=LAYERS):
+    """Build the benchmark model, run warmup and timed steps, and print memory results."""
+    # Setup parameters
     dtype = torch.bfloat16
-    # Setup model
     G = torch.Generator(device="cuda").manual_seed(0)
-    x = torch.randn(BATCH_SIZE, DIM, dtype=dtype, device="cuda", generator=G, requires_grad=True)
-    model = DeepFFN(dtype=dtype)
-    if not BASIC_MODE:
-        setup_hooks(model)
+    x = torch.randn(bs, DIM, dtype=dtype, device="cuda", generator=G, requires_grad=True)
+
+    # Our model
+    model = DeepFFN(layers, dtype=dtype)
+    # if not BASIC_MODE:
+    setup_hooks(model)
 
     # Run baseline
-    run_step(x, model, sparse=False, steps=1)
-    tracking_dn, vram_dn, avg_time = run_step(x, model, sparse=False, steps=3)
-    print(f'Baseline: {vram_dn = :.2f} MB, {avg_time=:.2f} ms')
-    print("-" * 50)
+    if bs < 32_001:
+        run_step(x, model, sparse=False, steps=2)
+        tracking_dn, vram_dn, avg_time_dn = run_step(x, model, sparse=False, steps=3)
+        print(f"Baseline: {vram_dn = :.0f} MB, avg_time = {avg_time_dn:.2f} ms")
 
-    # Setup sparse buffer (in basic mode layers allocate on-the-fly)
+    # Setup sparse buffer and run model (in basic mode layers allocate on-the-fly)
     buffer = None
     if not BASIC_MODE:
         hdim_expanded = math.floor(DIM * 5.25)
-        buffer_scale = 0.55 * (2 if FFN_BLOCK_LAYERS == 3 else 1)
-        value_capacity = int(BATCH_SIZE * hdim_expanded * LAYERS * buffer_scale)
-        bits_per_value = 15 if PACKED_15BIT else 16
+        buffer_scale = 0.6 * (2 if FFN_BLOCK_LAYERS == 3 else 1)
+        value_capacity = int(bs * hdim_expanded * layers * buffer_scale)
+        bits_per_value = 15 if PACK_15BIT else 16
         buffer_size = (value_capacity * bits_per_value + 7) // 8
         buffer = TensorBuffer(
-            buffer_size, dtype=dtype, device="cuda", packed_15bit=PACKED_15BIT
+            buffer_size, dtype=dtype, device="cuda", pack_15bit=PACK_15BIT
         )
 
-    # Run sparse model
-    run_step(x, model, buffer, sparse=True, steps=1)
+    run_step(x, model, buffer, sparse=True, steps=2)
     tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, steps=3)
-    print(f"VRAM allocated by tensors: {vram:.2f} MB")
-    print(f'Total time: {avg_time:.2f} ms')
+    print(f"Compressed: {vram = :.0f} MB, avg_time = {avg_time:.2f} ms")
 
-    print(f'{tracking_dn = }')
-    print(f'{tracking = }')
-
+    # Check correctness
     if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
+        print("Predicted values are different.")
+        print(f"{tracking_dn = }")
+        print(f"{tracking = }")
         torch.testing.assert_close(tracking, tracking_dn, atol=3e-6, rtol=3e-6)
-        assert vram < vram_dn * 1.1
+
+    return vram_dn, avg_time_dn, vram, avg_time
 
 
-def run_base():
-    torch.set_printoptions(precision=7)
-    torch.set_float32_matmul_precision("high")
-    torch.manual_seed(0)
-    torch._logging.set_logs(graph_breaks=True)
-    evaluate()
+def run_batch():
+    print(f'{PACK_15BIT = }')
+    import csv
+
+    batch_sizes = [32, 128, 512, 2000, 4000, 8000, 16000, 32000, 40000, 75_000, 100_000]
+
+    with open("relu2_sparse_b15.csv", "a", newline="") as f:
+        writer = csv.writer(f)
+
+        writer.writerow([
+            "batch_size", "vram_dn", "avg_time_dn", "vram", "avg_time",
+        ])
+
+        for bs in batch_sizes:
+            print("-" * 50)
+            print(f'{bs = }')
+
+            vram_dn, avg_time_dn, vram, avg_time = evaluate(bs=bs)
+            writer.writerow([bs, vram_dn, avg_time_dn, vram, avg_time])
+            f.flush()
 
 
 if __name__ == "__main__":
-    run_base()
+    # run_batch()
+    evaluate(bs=32_000)

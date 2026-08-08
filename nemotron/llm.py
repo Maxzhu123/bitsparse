@@ -779,7 +779,7 @@ class NemotronHMLP(nn.Module):
         if self.config.sparse_ffn:
             W1 = self.up_proj.weight
             W2 = self.down_proj.weight
-            out = FFNRelu2.apply(x, W1, W2, sparse_data=self.config.sparse_data, packed_15bit=self.config.pack_15bit)
+            out = FFNRelu2.apply(x, W1, W2, sparse_data=self.config.sparse_data, pack_15bit=self.config.pack_15bit)
             #out = FFNSparseRelu2.apply(x, W1, W2, self.config.sparse_data)
             return out
         else:

@@ -286,11 +286,11 @@ class DeepFFN_abc(nn.Module):
         """Run the dense baseline on ``x[B, D]`` through all residual layers."""
         if self.block_layers == 2:
             for W1, W2 in zip(self.W1s, self.W2s):
-                x_inner = x
+                x_inner = F.rms_norm(x, x.shape[1:])
                 x = x + self.block_forward(x_inner, W1, W2)
         else:
             for W1, W2, W3 in zip(self.W1s, self.W2s, self.W3s):
-                x_inner = x
+                x_inner = F.rms_norm(x, x.shape[1:])
                 x = x + self.block_forward(x_inner, W1, W2, W3)
         return x
 

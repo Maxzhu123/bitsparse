@@ -46,7 +46,7 @@ def _prepare_tiles(dense: Tensor) -> _PreparedTiles:
 def dense_to_tilesparse(
     dense: Tensor,
     sparse_data: TensorBuffer | None = None,
-    packed_15bit: bool = False,
+    pack_15bit: bool = False,
 ) -> BitsparseTensor:
     """Convert one dense matrix into a :class:`BitsparseTensor`."""
     prepared = _prepare_tiles(dense)
@@ -61,10 +61,10 @@ def dense_to_tilesparse(
     else:
         if sparse_data.dtype != dense.dtype:
             raise ValueError("TensorBuffer dtype must match the dense tensor dtype")
-        if sparse_data.packed_15bit != packed_15bit:
-            raise ValueError("packed_15bit must match the TensorBuffer encoding")
+        if sparse_data.pack_15bit != pack_15bit:
+            raise ValueError("pack_15bit must match the TensorBuffer encoding")
         vals = sparse_data.vals
-        if packed_15bit:
+        if pack_15bit:
             # Eight logical values occupy exactly fifteen bytes. Aligning each
             # activation keeps independent pack launches from sharing bytes.
             vals_offset = ((sparse_data.offset + 7) // 8 * 8).clone()
@@ -74,7 +74,7 @@ def dense_to_tilesparse(
     vals, vals_offset = compact_vals(
         dense, tile_prefix, vals, vals_offset,
         M, N, grid_n, num_tiles, BLOCK_M, BLOCK_N, TILE_NUMEL,
-        packed_15bit,
+        pack_15bit,
     )
 
     if sparse_data is not None:
@@ -83,6 +83,6 @@ def dense_to_tilesparse(
     return BitsparseTensor(
         vals, tile_bitmasks, tile_prefix,
         grid_m, grid_n, BLOCK_M, BLOCK_N, dense.shape,
-        vals_offset=vals_offset, packed_15bit=packed_15bit,
+        vals_offset=vals_offset, pack_15bit=pack_15bit,
         value_dtype=dense.dtype,
     )

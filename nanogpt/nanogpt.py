@@ -92,7 +92,7 @@ class MLP(nn.Module):
             W2 = self.proj.weight.type_as(x)
             b1 = self.fc.bias.type_as(x)
             b2 = self.proj.bias.type_as(x)
-            return FFNRelu2.apply(x, W1, W2, b1=b1, b2=b2, packed_15bit=self.cfg['packed_15bit'])
+            return FFNRelu2.apply(x, W1, W2, b1=b1, b2=b2, pack_15bit=self.cfg['pack_15bit'])
         else:
             if self.cfg['checkpoint']:
                 return torch.utils.checkpoint.checkpoint(self._forward_basic, x)

@@ -41,19 +41,19 @@ def compact_vals(
     dense: Tensor, tile_prefix: Tensor,
     vals: Tensor | None, vals_offset: Tensor | None,
     M: int, N: int, grid_n: int, num_tiles: int,
-    BLOCK_M: int, BLOCK_N: int, TILE_NUMEL: int, packed_15bit: bool,
+    BLOCK_M: int, BLOCK_N: int, TILE_NUMEL: int, pack_15bit: bool,
 ) -> tuple[Tensor, Tensor]:
     """Compact positive values into standalone or preallocated storage."""
     staging_numel = dense.numel()
     if vals is None:
         nnz = int(tile_prefix[-1].item())
         staging_numel = nnz
-        size = packed_storage_nbytes(nnz) if packed_15bit else nnz
-        dtype = torch.uint8 if packed_15bit else dense.dtype
+        size = packed_storage_nbytes(nnz) if pack_15bit else nnz
+        dtype = torch.uint8 if pack_15bit else dense.dtype
         vals = torch.empty(size, device=dense.device, dtype=dtype)
         vals_offset = torch.zeros((), device=dense.device, dtype=torch.int64)
 
-    if packed_15bit:
+    if pack_15bit:
         # Preallocated storage uses a dense upper bound to avoid a host read.
         raw_vals = torch.empty(staging_numel, device=dense.device, dtype=dense.dtype)
         # prefix[0] supplies the zero staging offset.
@@ -89,7 +89,7 @@ def unpack_batch_(
     """Unpack slice of sparse tiles into a dense output``batch_rows x K`` slice (in-place)."""
     BLOCK_M = sparse.BLOCK_M
     BLOCK_N = sparse.BLOCK_N
-    if sparse.packed_15bit:
+    if sparse.pack_15bit:
         _unpack_batch_15_kernel[(num_tiles_in_batch,)](
             sparse.vals.view(-1).view(torch.uint16),
             sparse.bitmask, sparse.prefix, sparse.vals_offset,
@@ -119,7 +119,7 @@ def unpack_relu2_batch_(
     """Unpack stored ``r = relu(a)`` tiles as ``k * r²`` into dense (in-place)."""
     BLOCK_M = sparse.BLOCK_M
     BLOCK_N = sparse.BLOCK_N
-    if sparse.packed_15bit:
+    if sparse.pack_15bit:
         _unpack_relu2_batch_15_kernel[(num_tiles_in_batch,)](
             sparse.vals.view(-1).view(torch.uint16),
             sparse.bitmask, sparse.prefix, sparse.vals_offset,
@@ -167,7 +167,7 @@ def relu2_grad_sparse_(grad: Tensor, sparse_z: BitsparseTensor) -> Tensor:
     """
     BLOCK_M = sparse_z.BLOCK_M
     BLOCK_N = sparse_z.BLOCK_N
-    if sparse_z.packed_15bit:
+    if sparse_z.pack_15bit:
         _relu2_grad_sparse_15_kernel[(sparse_z.grid_m, sparse_z.grid_n)](
             grad, sparse_z.vals.view(-1).view(torch.uint16),
             sparse_z.bitmask, sparse_z.prefix, sparse_z.vals_offset,

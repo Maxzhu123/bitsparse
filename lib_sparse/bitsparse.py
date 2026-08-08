@@ -23,7 +23,7 @@ class BitsparseTensor:
 
     def __init__(self, vals, bitmask, prefix,
                  grid_m, grid_n, BLOCK_M, BLOCK_N, shape,
-                 vals_offset=None, packed_15bit=False, value_dtype=None):
+                 vals_offset=None, pack_15bit=False, value_dtype=None):
         """Store compressed values and tile metadata for later unpack/masking."""
         self.vals = vals
         self.bitmask = bitmask
@@ -31,7 +31,7 @@ class BitsparseTensor:
         if vals_offset is None:
             vals_offset = torch.tensor(0, device=vals.device, dtype=torch.int64)
         self.vals_offset = vals_offset
-        self.packed_15bit = packed_15bit
+        self.pack_15bit = pack_15bit
         self.value_dtype = vals.dtype if value_dtype is None else value_dtype
         self.grid_m = grid_m
         self.grid_n = grid_n
@@ -42,7 +42,7 @@ class BitsparseTensor:
     def __repr__(self):
         return (f"BitsparseTensor(shape={list(self.shape)}, "
                 f"nnz={self.nnz()}, sparsity={self.sparsity_ratio():.2f}, "
-                f"packed_15bit={self.packed_15bit})")
+                f"pack_15bit={self.pack_15bit})")
 
     def nnz(self):
         """Count set bitmask bits. Intended for diagnostics, not hot paths."""
@@ -51,7 +51,7 @@ class BitsparseTensor:
 
     def vram_size(self):
         nnz = int(self.prefix[-1].item())
-        val_size = packed_nbytes(nnz) if self.packed_15bit else nnz * self.vals.element_size()
+        val_size = packed_nbytes(nnz) if self.pack_15bit else nnz * self.vals.element_size()
         bitmask_size = self.bitmask.element_size() * self.bitmask.nelement()
         prefix_size = self.prefix.element_size() * self.prefix.nelement()
         return (val_size + bitmask_size + prefix_size) / 1024 ** 2
@@ -65,17 +65,17 @@ class TensorBuffer:
     offset: Tensor      # Next offset for where next element can go, tracking where the buffer is filled to.
 
     def __init__(self, size: int, device="cuda", dtype=torch.bfloat16,
-                 packed_15bit: bool = False):
+                 pack_15bit: bool = False):
         """ size: number of storage bytes in buffer
             device: device of buffer
             dtype: logical datatype of stored values"""
         self.size = size
         self.device = device
         self.dtype = dtype
-        self.packed_15bit = packed_15bit
+        self.pack_15bit = pack_15bit
 
         # Init storage tensors
-        if packed_15bit:
+        if pack_15bit:
             storage_size = (self.size + 3) // 4 * 4 + 4
             self.vals = torch.zeros(storage_size, device=self.device, dtype=torch.uint8)
         else:
@@ -91,12 +91,12 @@ class TensorBuffer:
 
     def to_state(self):
         """ Returns state in current buffer, decomposed into its objects for reloading. Useful for torch ops. """
-        return self.size, self.device, self.dtype, self.packed_15bit, self.vals, self.offset
+        return self.size, self.device, self.dtype, self.pack_15bit, self.vals, self.offset
 
     @staticmethod
-    def from_state(size, device, dtype, packed_15bit, vals, offset) -> TensorBuffer:
+    def from_state(size, device, dtype, pack_15bit, vals, offset) -> TensorBuffer:
         """ Creates a TensorBuffer instance from its state. """
-        buffer = TensorBuffer(size, device, dtype, packed_15bit)
+        buffer = TensorBuffer(size, device, dtype, pack_15bit)
         buffer.vals = vals
         buffer.offset = offset
         return buffer

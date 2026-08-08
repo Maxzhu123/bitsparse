@@ -112,7 +112,7 @@ def evaluate_checkpoint(
     model = GPT(
         vocab_size=vocab_size,
         num_layers=num_layers,
-        model_dim=model_dim, cfg={"bitsparse": False, "packed_15bit": True, "checkpoint": True},
+        model_dim=model_dim, cfg={"bitsparse": False, "pack_15bit": True, "checkpoint": True},
     )
     model.load_state_dict(state_dict)
     model.cuda()
