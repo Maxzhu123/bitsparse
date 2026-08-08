@@ -12,7 +12,7 @@ from config import RELU2_SCALE
 # ------------------------------------------------------------------------------
 # Evaluation Loop
 # ------------------------------------------------------------------------------
-def run_step(x, model, buffer=None, sparse=False, steps=1):
+def run_step(x, model, buffer=None, sparse=False, pack_15bit=False, steps=1):
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
@@ -25,7 +25,7 @@ def run_step(x, model, buffer=None, sparse=False, steps=1):
         model.zero_grad()
         torch.cuda.reset_peak_memory_stats("cuda")
         if sparse:
-            y = model.forward(x, buffer)
+            y = model.forward(x, pack_15bit, buffer)
         else:
             y = model.forward_base(x)
         loss = (y - x).abs().mean()
@@ -49,6 +49,7 @@ def run_step(x, model, buffer=None, sparse=False, steps=1):
 
     return tracking, allocated, avg_time
 
+
 def run_batch(evaluate, save_name="results.csv"):
     import csv
 
@@ -58,22 +59,42 @@ def run_batch(evaluate, save_name="results.csv"):
         writer = csv.writer(f)
 
         writer.writerow([
-            "batch_size", "vram_dn", "avg_time_dn", "vram", "avg_time",
+            "batch_size", "vram_dn", "avg_time_dn", "vram", "avg_time", "vram_15bit", "avg_time_15bit",
         ])
 
         for bs in batch_sizes:
             print("-" * 50)
             print(f'{bs = }')
 
-            vram_dn, avg_time_dn, vram, avg_time = evaluate(bs=bs)
-            writer.writerow([bs, vram_dn, avg_time_dn, vram, avg_time])
+            vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit = evaluate(bs=bs)
+            writer.writerow([bs, vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit])
+            f.flush()
+
+
+def run_layers(evaluate, bs, save_name="results.csv"):
+    import csv
+
+    sp_blocks = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+
+    with open(save_name, "a", newline="") as f:
+        writer = csv.writer(f)
+
+        writer.writerow([
+            "sp_blocks", "vram_dn", "avg_time_dn", "vram", "avg_time",
+        ])
+
+        for b in sp_blocks:
+            print("-" * 50)
+            print(f'{b = }')
+
+            vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit = evaluate(bs=bs, sp_blocks=b)
+            writer.writerow([b, vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit])
             f.flush()
 
 
 # ------------------------------------------------------------------------------
 # Generate parameters
 # ------------------------------------------------------------------------------
-
 def gen_params(dim, G, dtype, expansion=5.25, device="cuda"):
     """ 2 layer FFN parameters """
     hdim = math.floor(dim * expansion)
@@ -108,7 +129,6 @@ def gen_params_3(dim, G, dtype, expansion=5.25, device="cuda"):
 # ------------------------------------------------------------------------------
 # Baseline FFN layers parameters
 # ------------------------------------------------------------------------------
-
 class FFNRelu2_2(Function):
     @staticmethod
     def forward(ctx, x, W1, W2):
@@ -139,6 +159,18 @@ class FFNRelu2_2(Function):
         if needs_x:
             grad_x = grad_preact @ W1
         return grad_x, grad_W1, grad_W2
+
+    @staticmethod
+    def apply_ckpt(x, W1, W2):
+        return torch.utils.checkpoint.checkpoint(FFNRelu2_2.forward_ckpt, x, W1, W2, use_reentrant=False)
+
+    @staticmethod
+    def forward_ckpt(x, W1, W2):
+        z = x @ W1.T
+        r = z.relu_()
+        z = r.square()
+        z.mul_(RELU2_SCALE)
+        return z @ W2.T
 
 
 class FFNRelu2_3(Function):
@@ -225,6 +257,18 @@ class FFN(Function):
         grad_W1 = grad_preact.T @ x
         return grad_x, grad_W1, grad_W2, None, None
 
+    @staticmethod
+    def apply_ckpt(x, W1, W2):
+        return torch.utils.checkpoint.checkpoint(FFN.forward_ckpt, x, W1, W2, use_reentrant=False)
+
+    @staticmethod
+    def forward_ckpt(x, W1, W2):
+        """Run the dense FFN forward pass and save tensors for backward."""
+        z = x @ W1.T
+        z.relu_()
+        output = z @ W2.T
+        return output
+
 
 class FFN_3(Function):
     """Dense 3-layer FFN — normal backward (saved intermediates, no checkpointing)."""
@@ -280,7 +324,7 @@ class FFN_3(Function):
 class DeepFFN_abc(nn.Module):
     """Stack of residual FFN layers ``x <- x + FFN(x)`` for benchmarking."""
 
-    def __init__(self, dtype, layers, hdim, block_layers=2):
+    def __init__(self, dtype, layers, sp_blocks, hdim, block_layers=2, ckpt=False):
         super().__init__()
         G = torch.Generator(device="cuda").manual_seed(0)
         self.block_layers = block_layers
@@ -295,13 +339,8 @@ class DeepFFN_abc(nn.Module):
                 self.W1s.append(nn.Parameter(W1))
                 self.W2s.append(nn.Parameter(W2))
                 self.W3s.append(nn.Parameter(W3))
-        if self.block_layers == 3:
-            self.block_forward = FFN_3.apply
-        elif self.block_layers == 2:
-            self.block_forward = FFN.apply
-        else:
-            raise NotImplementedError
 
+        self.sp_blocks = sp_blocks
         # total_params = sum(p.numel() for p in self.parameters())
         # print(f'Model: {total_params = }, size={total_params * 2 // (1024 * 1024)} MB')
 
@@ -309,18 +348,21 @@ class DeepFFN_abc(nn.Module):
     def forward_base(self, x):
         """Run the dense baseline on ``x[B, D]`` through all residual layers."""
         if self.block_layers == 2:
-            for W1, W2 in zip(self.W1s, self.W2s):
+            for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
                 x_inner = F.rms_norm(x, x.shape[1:])
-                x = x + self.block_forward(x_inner, W1, W2)
+                if i < self.sp_blocks:
+                    x = x + FFN.apply_ckpt(x_inner, W1, W2)
+                else:
+                    x = x + FFN.apply(x_inner, W1, W2)
         else:
             for W1, W2, W3 in zip(self.W1s, self.W2s, self.W3s):
                 x_inner = F.rms_norm(x, x.shape[1:])
-                x = x + self.block_forward(x_inner, W1, W2, W3)
+                x = x + FFN_3.apply(x_inner, W1, W2, W3)
         return x
 
 
 class FFN_relu2_abc(nn.Module):
-    def __init__(self, dtype, layers=12, hidm=4096, block_layers=2):
+    def __init__(self, dtype, sp_blocks, layers=12, hidm=4096, block_layers=2):
         super().__init__()
         G = torch.Generator(device="cuda").manual_seed(0)
         self.block_layers = block_layers
@@ -335,22 +377,21 @@ class FFN_relu2_abc(nn.Module):
                 self.W1s.append(nn.Parameter(W1))
                 self.W2s.append(nn.Parameter(W2))
                 self.W3s.append(nn.Parameter(W3))
-        if self.block_layers == 3:
-            self.block_forward = FFNRelu2_3.apply
-        elif self.block_layers == 2:
-            self.block_forward = FFNRelu2_2.apply
-        else:
-            raise NotImplementedError
+
+        self.sp_blocks = sp_blocks
 
     def forward_base(self, x):
         if self.block_layers == 2:
-            for W1, W2 in zip(self.W1s, self.W2s):
+            for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
                 x_inner = F.rms_norm(x, x.shape[1:])
-                x = x + self.block_forward(x_inner, W1, W2)
+                if i < self.sp_blocks:
+                    x = x + FFNRelu2_2.apply_ckpt(x_inner, W1, W2)
+                else:
+                    x = x + FFNRelu2_2.apply(x_inner, W1, W2)
         else:
             for W1, W2, W3 in zip(self.W1s, self.W2s, self.W3s):
                 x_inner = F.rms_norm(x, x.shape[1:])
-                x = x + self.block_forward(x_inner, W1, W2, W3)
+                x = x + FFNRelu2_3.apply(x_inner, W1, W2, W3)
         return x
 
 
