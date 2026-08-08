@@ -76,7 +76,6 @@ def evaluate(bs=BATCH_SIZE, layers=LAYERS, sp_blocks=LAYERS):
     run_step(x, model, buffer, sparse=True, steps=2)
     tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, pack_15bit=False, steps=5)
     print(f"Compressed: {vram = :.0f} MB, avg_time = {avg_time:.2f} ms")
-
     # Check correctness
     if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
         print("Predicted values are different.")
@@ -96,10 +95,9 @@ def evaluate(bs=BATCH_SIZE, layers=LAYERS, sp_blocks=LAYERS):
             buffer_size, dtype=dtype, device="cuda", pack_15bit=True
         )
 
-    run_step(x, model, buffer, sparse=True, steps=2)
-    tracking, vram_15bit, avg_time_15bit = run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=5)
+    run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=3)
+    tracking, vram_15bit, avg_time_15bit = run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=1)
     print(f"Compressed 15bit: {vram_15bit = :.0f} MB, avg_time = {avg_time_15bit:.2f} ms")
-
     # Check correctness
     if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
         print("Predicted values are different.")
@@ -113,6 +111,6 @@ def evaluate(bs=BATCH_SIZE, layers=LAYERS, sp_blocks=LAYERS):
 
 if __name__ == "__main__":
     from experiment import run_batch, run_layers
-    # run_batch(evaluate, save_name="relu_ckpt.csv")
-    run_layers(evaluate, bs=16_000, save_name="relu_layers.csv")
+    run_batch(evaluate, save_name="relu_.csv")
+    # run_layers(evaluate, bs=16_000, save_name="relu_layers.csv")
     # evaluate(bs=16_000)

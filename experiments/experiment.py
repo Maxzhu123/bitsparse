@@ -80,7 +80,7 @@ def run_layers(evaluate, bs, save_name="results.csv"):
         writer = csv.writer(f)
 
         writer.writerow([
-            "sp_blocks", "vram_dn", "avg_time_dn", "vram", "avg_time",
+            "sp_blocks", "vram_dn", "avg_time_dn", "vram", "avg_time", "vram_15bit", "avg_time_15bit",
         ])
 
         for b in sp_blocks:
