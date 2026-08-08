@@ -49,6 +49,27 @@ def run_step(x, model, buffer=None, sparse=False, steps=1):
 
     return tracking, allocated, avg_time
 
+def run_batch(evaluate, save_name="results.csv"):
+    import csv
+
+    batch_sizes = [32, 128, 512, 2000, 4000, 8000, 16000, 32000]
+
+    with open(save_name, "a", newline="") as f:
+        writer = csv.writer(f)
+
+        writer.writerow([
+            "batch_size", "vram_dn", "avg_time_dn", "vram", "avg_time",
+        ])
+
+        for bs in batch_sizes:
+            print("-" * 50)
+            print(f'{bs = }')
+
+            vram_dn, avg_time_dn, vram, avg_time = evaluate(bs=bs)
+            writer.writerow([bs, vram_dn, avg_time_dn, vram, avg_time])
+            f.flush()
+
+
 # ------------------------------------------------------------------------------
 # Generate parameters
 # ------------------------------------------------------------------------------
@@ -331,3 +352,5 @@ class FFN_relu2_abc(nn.Module):
                 x_inner = F.rms_norm(x, x.shape[1:])
                 x = x + self.block_forward(x_inner, W1, W2, W3)
         return x
+
+

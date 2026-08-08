@@ -48,7 +48,7 @@ def dense_to_tilesparse(
     sparse_data: TensorBuffer | None = None,
     pack_15bit: bool = False,
 ) -> BitsparseTensor:
-    """Convert one dense matrix into a :class:`BitsparseTensor`."""
+    """Convert dense tensor into a BitsparseTensor."""
     prepared = _prepare_tiles(dense)
     M, N = prepared.M, prepared.N
     grid_m, grid_n = prepared.grid_m, prepared.grid_n

@@ -43,7 +43,8 @@ def compact_vals(
     M: int, N: int, grid_n: int, num_tiles: int,
     BLOCK_M: int, BLOCK_N: int, TILE_NUMEL: int, pack_15bit: bool,
 ) -> tuple[Tensor, Tensor]:
-    """Compact positive values into standalone or preallocated storage."""
+    """ Compact positive values into standalone or preallocated storage.
+        Supports 15-bit packing and preallocated vals buffer. """
     staging_numel = dense.numel()
     if vals is None:
         nnz = int(tile_prefix[-1].item())
@@ -64,14 +65,15 @@ def compact_vals(
             TILE_NUMEL=TILE_NUMEL,
         )
         launch_bytes = packed_nbytes(staging_numel)
-        if launch_bytes:
-            _pack_15bit_kernel[
-                lambda meta: (triton.cdiv(launch_bytes, meta["BLOCK_SIZE"]),)
-            ](
-                raw_vals.view(torch.uint16), vals, vals_offset,
-                tile_prefix, num_tiles,
-            )
+        _pack_15bit_kernel[
+            lambda meta: (triton.cdiv(launch_bytes, meta["BLOCK_SIZE"]),)
+        ](
+            raw_vals.view(torch.uint16), vals, vals_offset,
+            tile_prefix, num_tiles,
+        )
         return vals, vals_offset
+
+    # Normal version version
     _compact_vals_kernel[(num_tiles,)](
         dense, tile_prefix, vals, vals_offset,
         M, N, grid_n,

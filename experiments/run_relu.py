@@ -6,8 +6,8 @@ import math
 from lib_sparse.layers import FFNRelu, FFNRelu_3
 from lib_sparse.bitsparse import TensorBuffer
 
-from .experiment import run_step, DeepFFN_abc
-from .utils import setup_hooks
+from experiment import run_step, DeepFFN_abc
+from utils import setup_hooks
 
 FFN_BLOCK_LAYERS = 2
 LAYERS = 8
@@ -85,28 +85,7 @@ def evaluate(bs=BATCH_SIZE, layers=LAYERS):
     return vram_dn, avg_time_dn, vram, avg_time
 
 
-def run_batch():
-    print(f'{PACK_15BIT = }')
-    import csv
-
-    batch_sizes = [32, 128, 512, 2000, 4000, 8000, 16000, 32000, 40000, 75_000, 100_000]
-
-    with open("relu_sparse.csv", "a", newline="") as f:
-        writer = csv.writer(f)
-
-        writer.writerow([
-            "batch_size", "vram_dn", "avg_time_dn", "vram", "avg_time",
-        ])
-
-        for bs in batch_sizes:
-            print("-" * 50)
-            print(f'{bs = }')
-
-            vram_dn, avg_time_dn, vram, avg_time = evaluate(bs=bs)
-            writer.writerow([bs, vram_dn, avg_time_dn, vram, avg_time])
-            f.flush()
-
-
 if __name__ == "__main__":
-    run_batch()
-    # evaluate(bs=45_000)
+    from experiment import run_batch
+    # run_batch(evaluate, save_name="relu.csv")
+    evaluate(bs=32_000)

@@ -201,7 +201,7 @@ class FFNSparseRelu2(Function):
         k = 1 / sqrt(3) matches the RMS of ReLU for standard-normal inputs.
     """
     @staticmethod
-    def forward(ctx, x, W1, W2, sparse_data: TensorBuffer | None=None, pack_15bit: bool=False):
+    def forward(ctx, x, W1, W2, sparse_data: TensorBuffer|None=None, pack_15bit: bool=False):
         bs_dims = x.shape[:-1]          # [*bs, d]
         x = x.reshape(-1, x.shape[-1])
 
