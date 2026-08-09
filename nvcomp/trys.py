@@ -41,7 +41,7 @@ class Compressor:
         compressed_nv = codec.encode(src, out=dst)
 
         # Only this prefix contains valid compressed data.
-        compressed = storage[:compressed_nv.buffer_size]
+        compressed = storage[:compressed_nv.buffer_size].clone()
 
         meta = {
             "shape": x.shape,

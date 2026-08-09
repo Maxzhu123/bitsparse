@@ -2,9 +2,13 @@ from nvidia import nvcomp
 import torch
 from torch import Tensor
 from torch.autograd import Function
+import torch.nn.functional as F
+import csv
 
-algos = ["LZ4", "Snappy", "Zstd", "Cascaded", "Deflate", "GDeflate", "ANS", "Bitcomp", "Gzip"]
+from experiments.experiment import FFNReluABC, FFN, FFNRelu2ABC
 
+algos = ["LZ4", "Zstd", "Cascaded", "Bitcomp"]
+ALGO = None
 
 class Compressor:
     def __init__(self, algorithm):
@@ -42,7 +46,7 @@ class Compressor:
         compressed_nv = codec.encode(src, out=dst)
 
         # Only this prefix contains valid compressed data.
-        compressed = storage[:compressed_nv.buffer_size]
+        compressed = storage[:compressed_nv.buffer_size].clone()
 
         meta = {
             "shape": x.shape,
@@ -86,6 +90,7 @@ class ReluLinear(Function):
 
         h = z.relu_()
         h_sparse = compressor.compress_tensor(h)
+        # print(h_sparse[0].shape)
         ctx.h_sparse = h_sparse
         y = h @ W.T
         return y
@@ -100,7 +105,7 @@ class ReluLinear(Function):
         ctx.h_sparse = None
 
         h = compressor.decompress_tensor(compressed, meta)
-
+        del compressed, meta
         grad_W2 = torch.mm(grad_output.t(), h)
 
         # Gradients for input
@@ -131,3 +136,117 @@ class FFNRelu:
 
         y = y.reshape(*bs_dims,  y.shape[-1])   # [*bs, d_out]
         return y
+
+
+class Relu2Linear(Function):
+    """y = relu(Wx)."""
+
+    @staticmethod
+    def forward(ctx, z, W, compressor: Compressor):
+        """ relu(Wx) layer. """
+        ctx.compressor = compressor
+        ctx.save_for_backward(W)
+        h = z.relu_()
+        h_sparse = compressor.compress_tensor(h)
+        ctx.h_sparse = h_sparse
+        h.square_()
+        y = h @ W.T
+        return y
+
+    @staticmethod
+    @torch.compiler.disable
+    def backward(ctx, grad_output: Tensor):
+        """Compute gradients."""
+        compressor = ctx.compressor
+        W = ctx.saved_tensors[0]
+        needs_z = ctx.needs_input_grad[0]
+        compressed, meta = ctx.h_sparse
+        ctx.h_sparse = None
+
+        h = compressor.decompress_tensor(compressed, meta)
+        del compressed, meta
+
+        grad_W2 = torch.mm(grad_output.t(), h.square())
+
+        # Needs gradient for z
+        if needs_z:
+            grad_h = grad_output @ W
+            grad_z = 2 * grad_h * h
+        else:
+            grad_z = None
+
+        return grad_z, grad_W2, None
+
+
+class FFNRelu2:
+    @staticmethod
+    def apply(x, W1, W2, compressor: Compressor  ):
+        """ FFN block with relu2 activation, 2 linear layers.
+            x.shape = [*bs, d_in]
+            W1.shape = [d_ff, d_in]
+            W2.shape = [d_ff, d_out]
+            b1.shape = [d_ff]
+            b2.shape = [d_out]
+
+            out.shape = [*bs, d_out]
+        """
+        bs_dims = x.shape[:-1]          # [*bs, d_in]
+        x = x.reshape(-1, x.shape[-1])  # [batch, d_in]
+
+        z = x @ W1.T                    # [batch, d_ff]
+        y = Relu2Linear.apply(z, W2, compressor) # [batch, d_out]
+
+        y = y.reshape(*bs_dims,  y.shape[-1])   # [*bs, d_out]
+        return y
+
+
+class FFNReluNVCOMP(FFNReluABC):
+    def __init__(self, layers, sp_blocks, dim, dtype):
+        """Construct a stack of residual FFN layers for the memory benchmark."""
+        super().__init__(dtype, layers, sp_blocks, dim)
+        self.compressor = Compressor(ALGO)
+
+    def forward(self, x, pack_15bit, buffer):
+        """Run the residual FFN stack while allocating sparse storage for this pass."""
+
+        for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
+            x_inner = F.rms_norm(x, x.shape[1:])
+            x = x + FFNRelu.apply(x_inner, W1, W2, self.compressor)
+        return x
+
+
+class FFNRelu2NVCOMP(FFNRelu2ABC):
+    def __init__(self, layers, sp_blocks, dim, dtype):
+        """Construct a stack of residual FFN layers for the memory benchmark."""
+        super().__init__(dtype, layers, sp_blocks, dim)
+        self.compressor = Compressor(ALGO)
+
+    def forward(self, x, pack_15bit, buffer):
+        """Run the residual FFN stack while allocating sparse storage for this pass."""
+
+        for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
+            x_inner = F.rms_norm(x, x.shape[1:])
+            x = x + FFNRelu2.apply(x_inner, W1, W2, self.compressor)
+        return x
+
+
+if __name__ == "__main__":
+    from experiment import run_batch, run_layers, evaluate
+
+    # run_batch(FFNReluModel, save_name="relu2_sparser.csv")
+    # run_layers(FFNReluModel, bs=16_000, save_name="relu2_sparser_layers.csv")
+    with open("./results/relu_nvcomp.csv", "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "method", "vram", "avg_time",
+        ])
+
+        for algo in algos:
+            ALGO = algo
+            print(f"Running with {ALGO}")
+            _, _, vram, time, _, _ =evaluate(FFNReluNVCOMP, bs=16000, sp_blocks=0)
+            writer.writerow([algo, vram, time])
+            f.flush()
+
+            # exit(7)
+

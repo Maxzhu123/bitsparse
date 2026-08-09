@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import math
 import time
 import gc
+from cprint import c_print
 
 from config import RELU2_SCALE
 from experiments.utils import setup_hooks
@@ -15,7 +16,8 @@ BATCH_SIZE = 10000
 DIM = 4096
 
 BASIC_MODE = True
-
+DATA_SPARSITY = "Normal"
+c_print(f'{DATA_SPARSITY = }', color="green")
 # ------------------------------------------------------------------------------
 # Evaluation Loop
 # ------------------------------------------------------------------------------
@@ -107,13 +109,13 @@ def evaluate(model_fn, bs, layers=LAYERS, sp_blocks=LAYERS):
     x = torch.randn(bs, DIM, dtype=dtype, device="cuda", generator=G, requires_grad=True)
 
     # Our model
-    model = model_fn(layers, sp_blocks, dtype=dtype)
+    model = model_fn(layers, sp_blocks, dim=DIM, dtype=dtype)
     # if not BASIC_MODE:
     setup_hooks(model)
 
     # 1) Run baseline
-    run_step(x, model, sparse=False, steps=2)
-    tracking_dn, vram_dn, avg_time_dn = run_step(x, model, sparse=False, steps=5)
+    run_step(x, model, sparse=False, steps=1)
+    tracking_dn, vram_dn, avg_time_dn = run_step(x, model, sparse=False, steps=1)
     print(f"Baseline: {vram_dn = :.0f} MB, avg_time = {avg_time_dn:.2f} ms")
 
     # 2) Setup sparse buffer and run model (in basic mode layers allocate on-the-fly)
@@ -129,7 +131,7 @@ def evaluate(model_fn, bs, layers=LAYERS, sp_blocks=LAYERS):
         )
 
     run_step(x, model, buffer, sparse=True, steps=2)
-    tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, pack_15bit=False, steps=5)
+    tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, pack_15bit=False, steps=3)
     print(f"Compressed: {vram = :.0f} MB, avg_time = {avg_time:.2f} ms")
     # Check correctness
     if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
@@ -150,8 +152,8 @@ def evaluate(model_fn, bs, layers=LAYERS, sp_blocks=LAYERS):
             buffer_size, dtype=dtype, device="cuda", pack_15bit=True
         )
 
-    run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=2)
-    tracking, vram_15bit, avg_time_15bit = run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=5)
+    # run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=2)
+    tracking, vram_15bit, avg_time_15bit = run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=1)
     print(f"Compressed 15bit: {vram_15bit = :.0f} MB, avg_time = {avg_time_15bit:.2f} ms")
     # Check correctness
     if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
@@ -175,13 +177,16 @@ def gen_params(dim, G, dtype, expansion=5.25, device="cuda"):
     torch.nn.init.xavier_uniform_(W2, generator=G)
 
     # Basic
-    # shift = torch.randn(1, generator=G, device=device, dtype=dtype)
-    # W1 = W1 + 0.01 * shift * W1.std()
-    # W2 = W2 - 0.01 * shift * W2.std()
-
-    # Biased
-    # W1 = W1 + 0.07 * W1.std()     # relu
-    W1 = W1 + 0.1 * W1.std()        # relu2
+    if DATA_SPARSITY == "Normal":
+        shift = torch.randn(1, generator=G, device=device, dtype=dtype)
+        W1 = W1 + 0.01 * shift * W1.std()
+        W2 = W2 - 0.01 * shift * W2.std()
+    elif DATA_SPARSITY == "Sparse":
+        W1 = W1 + 0.1 * W1.std()        # 80% sparsity with ReLU2
+    elif DATA_SPARSITY == "RELU":
+        W1 = W1 + 0.1 * W1.std()        # 80% sparsity with ReLU
+    else:
+        raise NotImplementedError("Unknown sparsity type")
 
 
     return W1, W2
@@ -315,12 +320,12 @@ class FFNReluABC(nn.Module):
 
 
 class FFNRelu2ABC(nn.Module):
-    def __init__(self, dtype, sp_blocks, layers=12, hidm=4096):
+    def __init__(self, dtype, layers, sp_blocks, hdim):
         super().__init__()
         G = torch.Generator(device="cuda").manual_seed(0)
         self.W1s, self.W2s, self.W3s = nn.ParameterList(), nn.ParameterList(), nn.ParameterList()
         for _ in range(layers):
-            W1, W2 = gen_params(hidm, G, dtype=dtype)
+            W1, W2 = gen_params(hdim, G, dtype=dtype)
             self.W1s.append(nn.Parameter(W1))
             self.W2s.append(nn.Parameter(W2))
         self.sp_blocks = sp_blocks
@@ -333,5 +338,4 @@ class FFNRelu2ABC(nn.Module):
             else:
                 x = x + FFNRelu2_2.apply(x_inner, W1, W2)
         return x
-
 
