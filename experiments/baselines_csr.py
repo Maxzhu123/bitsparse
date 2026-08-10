@@ -17,6 +17,7 @@ def to_sparse_csr(h):
 
     return h_sparse
 
+
 class ReluLinear(Function):
     """y = relu(Wx)."""
 
@@ -26,10 +27,9 @@ class ReluLinear(Function):
         ctx.save_for_backward(W)
 
         h = z.relu_()
-
-        # print(h_sparse[0].shape)
-        ctx.h_sparse = to_sparse_csr(h)
         y = h @ W.T
+
+        ctx.h_sparse = to_sparse_csr(h)
         return y
 
     @staticmethod
@@ -45,11 +45,8 @@ class ReluLinear(Function):
         grad_W2 = grad_output.t() @ h
 
         # Gradients for input
-        if needs_z:
-            grad_h = grad_output @ W
-            grad_z = grad_h * (h > 0)
-        else:
-            grad_z = None
+        grad_h = grad_output @ W
+        grad_z = grad_h * (h > 0)
         return grad_z, grad_W2, None
 
 
@@ -138,7 +135,8 @@ class FFNReluCSR(FFNReluABC):
         """Construct a stack of residual FFN layers for the memory benchmark."""
         super().__init__(dtype, layers, sp_blocks, dim)
 
-    def forward(self, x, pack_15bit, buffer):
+    @torch.compile()
+    def forward(self, x, _, __):
         """Run the residual FFN stack while allocating sparse storage for this pass."""
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
@@ -152,7 +150,7 @@ class FFNRelu2CSR(FFNRelu2ABC):
         """Construct a stack of residual FFN layers for the memory benchmark."""
         super().__init__(dtype, layers, sp_blocks, dim)
 
-    def forward(self, x, pack_15bit, buffer):
+    def forward(self, x, _, __):
         """Run the residual FFN stack while allocating sparse storage for this pass."""
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
