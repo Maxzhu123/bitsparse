@@ -28,10 +28,11 @@ class FFNReluModel(FFNReluABC):
         return x
 
 
-
 if __name__ == "__main__":
     from experiment import run_batch, run_layers
 
-    run_batch(FFNReluModel, save_name="relu2_sparser.csv")
-    run_layers(FFNReluModel, bs=16_000, save_name="relu2_sparser_layers.csv")
+    for _ in range(3):
+        run_batch(FFNReluModel, sp_blocks=10, eval_steps=3, batch_sizes=[16_000], save_name="./results/relu2_sparser.csv")
+
+    # run_layers(FFNReluModel, bs=16_000, save_name="relu2_sparser_layers.csv")
     # evaluate(FFMReluModel, bs=16_000, sp_blocks=0)

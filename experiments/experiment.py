@@ -6,6 +6,7 @@ import math
 import time
 import gc
 from cprint import c_print
+import os
 
 from config import RELU2_SCALE
 from experiments.utils import setup_hooks
@@ -16,7 +17,7 @@ BATCH_SIZE = 10000
 DIM = 4096
 
 BASIC_MODE = True
-DATA_SPARSITY = "Sparse"        # "Normal", "Sparse", "ReLU"
+DATA_SPARSITY = "Normal"        # "Normal", "Sparse", "ReLU"
 c_print(f'{DATA_SPARSITY = }', color="green")
 # ------------------------------------------------------------------------------
 # Evaluation Loop
@@ -59,23 +60,28 @@ def run_step(x, model, buffer=None, sparse=False, pack_15bit=False, steps=1):
     return tracking, allocated, avg_time
 
 
-def run_batch(model_fn, save_name="results.csv"):
+def run_batch(model_fn, eval_steps, batch_sizes=None, sp_blocks=LAYERS, save_name="results.csv"):
     import csv
 
-    batch_sizes = [32, 128, 512, 2000, 4000, 8000, 16000, 32000]
+    if batch_sizes is None:
+        batch_sizes = [32, 128, 512, 2000, 4000, 8000, 16000, 32000]
+
+    file_exists = os.path.exists(save_name)
 
     with open(save_name, "a", newline="") as f:
         writer = csv.writer(f)
 
-        writer.writerow([
-            "batch_size", "vram_dn", "avg_time_dn", "vram", "avg_time", "vram_15bit", "avg_time_15bit",
-        ])
+        if not file_exists:
+            writer.writerow([
+                "batch_size", "vram_dn", "avg_time_dn", "vram", "avg_time", "vram_15bit", "avg_time_15bit",
+            ])
 
         for bs in batch_sizes:
             print("-" * 50)
             print(f'{bs = }')
 
-            vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit = evaluate(model_fn, bs=bs)
+            vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit = evaluate(
+                model_fn, sp_blocks=sp_blocks, eval_steps=eval_steps, bs=bs)
             writer.writerow([bs, vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit])
             f.flush()
 
@@ -101,7 +107,7 @@ def run_layers(model_fn, bs, save_name="results.csv"):
             f.flush()
 
 
-def evaluate(model_fn, bs, layers=LAYERS, sp_blocks=LAYERS):
+def evaluate(model_fn, bs, eval_steps=5, layers=LAYERS, sp_blocks=LAYERS):
     """Build the benchmark model, run warmup and timed steps, and print memory results."""
     # Setup parameters
     dtype = torch.bfloat16
@@ -115,7 +121,7 @@ def evaluate(model_fn, bs, layers=LAYERS, sp_blocks=LAYERS):
 
     # 1) Run baseline
     run_step(x, model, sparse=False, steps=1)
-    tracking_dn, vram_dn, avg_time_dn = run_step(x, model, sparse=False, steps=1)
+    tracking_dn, vram_dn, avg_time_dn = run_step(x, model, sparse=False, steps=eval_steps)
     print(f"Baseline: {vram_dn = :.0f} MB, avg_time = {avg_time_dn:.2f} ms")
 
     # 2) Setup sparse buffer and run model (in basic mode layers allocate on-the-fly)
@@ -130,8 +136,8 @@ def evaluate(model_fn, bs, layers=LAYERS, sp_blocks=LAYERS):
             buffer_size, dtype=dtype, device="cuda", pack_15bit=False
         )
 
-    run_step(x, model, buffer, sparse=True, steps=2)
-    tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, pack_15bit=False, steps=3)
+    run_step(x, model, buffer, sparse=True, steps=1)
+    tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, pack_15bit=False, steps=eval_steps)
     print(f"Compressed: {vram = :.0f} MB, avg_time = {avg_time:.2f} ms")
     # Check correctness
     if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
@@ -152,8 +158,8 @@ def evaluate(model_fn, bs, layers=LAYERS, sp_blocks=LAYERS):
             buffer_size, dtype=dtype, device="cuda", pack_15bit=True
         )
 
-    # run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=2)
-    tracking, vram_15bit, avg_time_15bit = run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=1)
+    run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=1)
+    tracking, vram_15bit, avg_time_15bit = run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=eval_steps)
     print(f"Compressed 15bit: {vram_15bit = :.0f} MB, avg_time = {avg_time_15bit:.2f} ms")
     # Check correctness
     if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
