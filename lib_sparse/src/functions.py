@@ -21,8 +21,8 @@ class _PreparedTiles(NamedTuple):
 
 def _prepare_tiles(dense: Tensor) -> _PreparedTiles:
     """Create tile masks and enqueue the logical nonzero prefix sum."""
-    if dense.dtype not in (torch.float16, torch.bfloat16):
-        raise TypeError("BitsparseTensor supports float16 and bfloat16 values")
+    if dense.dtype != torch.bfloat16:
+        raise TypeError("BitsparseTensor supports bfloat16 values")
     M, N = dense.shape
     grid_m, grid_n, num_tiles, TILE_NUMEL, TILE_BYTES = tile_grid(M, N, BLOCK_M, BLOCK_N)
 
@@ -80,6 +80,6 @@ def dense_to_tilesparse(
     return BitsparseTensor(
         vals, tile_bitmasks, tile_prefix,
         grid_m, grid_n, BLOCK_M, BLOCK_N, dense.shape,
-        vals_offset=vals_offset, pack_15bit=pack_15bit,
+        vals_offset=vals_offset, pack_sbit=pack_15bit,
         value_dtype=dense.dtype,
     )

@@ -28,7 +28,7 @@ def packed_storage_nbytes(numel: int) -> int:
 
 
 @triton.jit
-def load_15bit_at_indices(packed_ptr, value_indices, mask, BF16: tl.constexpr):
+def load_15bit_at_indices(packed_ptr, value_indices, mask):
     """Decode logical indices from a continuous stream viewed as uint16 words."""
     within_group = value_indices % 16
     word_indices = ((value_indices // 16) * 15
@@ -37,12 +37,7 @@ def load_15bit_at_indices(packed_ptr, value_indices, mask, BF16: tl.constexpr):
     word0 = tl.load(packed_ptr + word_indices, mask=mask, other=0).to(tl.uint32)
     word1 = tl.load(packed_ptr + word_indices + 1, mask=mask, other=0).to(tl.uint32)
     bits = ((word0 | (word1 << 16)) >> shifts) & 0x7FFF
-    bits = bits.to(tl.uint16)
-    if BF16:
-        values = bits.to(tl.bfloat16, bitcast=True)
-    else:
-        values = bits.to(tl.float16, bitcast=True)
-    return values
+    return bits.to(tl.uint16).to(tl.bfloat16, bitcast=True)
 
 
 @triton.autotune(configs=_PACK_15BIT_CONFIGS, key=["num_tiles"], cache_results=True)

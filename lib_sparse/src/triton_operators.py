@@ -118,7 +118,7 @@ def unpack_batch_(
     """Unpack slice of sparse tiles into a dense output``batch_rows x K`` slice (in-place)."""
     BLOCK_M = sparse.BLOCK_M
     BLOCK_N = sparse.BLOCK_N
-    if sparse.pack_15bit:
+    if sparse.pack_sbit:
         _unpack_batch_15_kernel[(num_tiles_in_batch,)](
             sparse.vals.view(-1).view(torch.uint16),
             sparse.bitmask, sparse.prefix, sparse.vals_offset,
@@ -126,7 +126,6 @@ def unpack_batch_(
             first_m_tile, grid_n, K, batch_rows,
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
             TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
-            IS_BF16=sparse.value_dtype == torch.bfloat16,
         )
         return output
     _unpack_batch_kernel[(num_tiles_in_batch,)](
@@ -147,7 +146,7 @@ def unpack_relu2_batch_(
     """Unpack stored ``r = relu(a)`` tiles as ``k * r²`` into dense (in-place)."""
     BLOCK_M = sparse.BLOCK_M
     BLOCK_N = sparse.BLOCK_N
-    if sparse.pack_15bit:
+    if sparse.pack_sbit:
         _unpack_relu2_batch_15_kernel[(num_tiles_in_batch,)](
             sparse.vals.view(-1).view(torch.uint16),
             sparse.bitmask, sparse.prefix, sparse.vals_offset,
@@ -156,7 +155,6 @@ def unpack_relu2_batch_(
             BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
             TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
             RELU2_SCALE=RELU2_SCALE,
-            IS_BF16=sparse.value_dtype == torch.bfloat16,
         )
         return output
     _unpack_relu2_batch_kernel[(num_tiles_in_batch,)](
@@ -194,7 +192,7 @@ def relu2_grad_sparse_(grad: Tensor, sparse_z: BitsparseTensor) -> Tensor:
     """
     BLOCK_M = sparse_z.BLOCK_M
     BLOCK_N = sparse_z.BLOCK_N
-    if sparse_z.pack_15bit:
+    if sparse_z.pack_sbit:
         _relu2_grad_sparse_15_kernel[(sparse_z.grid_m, sparse_z.grid_n)](
             grad, sparse_z.vals.view(-1).view(torch.uint16),
             sparse_z.bitmask, sparse_z.prefix, sparse_z.vals_offset,
@@ -203,7 +201,6 @@ def relu2_grad_sparse_(grad: Tensor, sparse_z: BitsparseTensor) -> Tensor:
             TILE_NUMEL=BLOCK_M * BLOCK_N,
             TILE_BYTES=BLOCK_M * BLOCK_N // 8,
             RELU2_SCALE=RELU2_SCALE,
-            IS_BF16=sparse_z.value_dtype == torch.bfloat16,
         )
         return grad
     _relu2_grad_sparse_kernel[(sparse_z.grid_m, sparse_z.grid_n)](

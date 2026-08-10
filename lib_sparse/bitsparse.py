@@ -19,7 +19,7 @@ class BitsparseTensor:
 
     def __init__(self, vals, bitmask, prefix,
                  grid_m, grid_n, BLOCK_M, BLOCK_N, shape,
-                 vals_offset=None, pack_15bit=False, value_dtype=None):
+                 vals_offset=None, pack_sbit=False, value_dtype=None):
         """Store compressed values and tile metadata for later unpack/masking."""
         self.vals = vals
         self.bitmask = bitmask
@@ -27,7 +27,7 @@ class BitsparseTensor:
         if vals_offset is None:
             vals_offset = torch.tensor(0, device=vals.device, dtype=torch.int64)
         self.vals_offset = vals_offset
-        self.pack_15bit = pack_15bit
+        self.pack_sbit = pack_sbit
         self.value_dtype = vals.dtype if value_dtype is None else value_dtype
         self.grid_m = grid_m
         self.grid_n = grid_n
@@ -38,7 +38,7 @@ class BitsparseTensor:
     def __repr__(self):
         return (f"BitsparseTensor(shape={list(self.shape)}, "
                 f"nnz={self.nnz()}, sparsity={self.sparsity_ratio():.2f}, "
-                f"pack_15bit={self.pack_15bit})")
+                f"pack_sbit={self.pack_sbit})")
 
     def nnz(self):
         """Count set bitmask bits. Intended for diagnostics, not hot paths."""
@@ -47,7 +47,7 @@ class BitsparseTensor:
 
     def vram_size(self):
         nnz = int(self.prefix[-1].item())
-        val_size = packed_nbytes(nnz) if self.pack_15bit else nnz * self.vals.element_size()
+        val_size = packed_nbytes(nnz) if self.pack_sbit else nnz * self.vals.element_size()
         bitmask_size = self.bitmask.element_size() * self.bitmask.nelement()
         prefix_size = self.prefix.element_size() * self.prefix.nelement()
         return val_size + bitmask_size + prefix_size
@@ -61,17 +61,16 @@ class TensorBuffer:
     offset: Tensor      # Next offset for where next element can go, tracking where the buffer is filled to.
 
     def __init__(self, size: int, device="cuda", dtype=torch.bfloat16,
-                 pack_15bit: bool = False):
+                 pack_sbit: bool = False):
         """ size: number of storage bytes in buffer
             device: device of buffer
             dtype: logical datatype of stored values"""
         self.size = size
         self.device = device
         self.dtype = dtype
-        self.pack_15bit = pack_15bit
 
         # Init storage tensors
-        if pack_15bit:
+        if pack_sbit:
             storage_size = (self.size + 3) // 4 * 4 + 4
             self.vals = torch.zeros(storage_size, device=self.device, dtype=torch.uint8)
         else:

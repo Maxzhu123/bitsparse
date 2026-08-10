@@ -104,15 +104,13 @@ def _tile_pack_kernel(
 #   path stages that stream as 16-bit values, then packs it continuously.
 # ═══════════════════════════════════════════════════════════════════════════════
 @triton.autotune(
-    configs=_COMPACT_VALS_CONFIGS,
-    key=["M", "N"],
-    cache_results=True,
+    configs=_COMPACT_VALS_CONFIGS, key=["M", "N"], cache_results=True,
 )
 @triton.jit
 def _compact_vals_kernel(
     dense_ptr,          # input:  dense X ∈ R^{M×N}
     tile_prefix_ptr,    # input:  uint32[n_tiles+1] logical value offsets
-    vals_out_ptr,       # output: compact fp16/bf16 buffer for positive values
+    vals_out_ptr,       # output: compact bf16 buffer for positive values
     layer_offset_ptr,   # input:  int64[1] global logical value offset
     first_tile, M, N, grid_n,  # chunk start, dimensions, and tile grid
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
@@ -145,11 +143,8 @@ def _compact_vals_kernel(
 # _unpack_batch_kernel / _unpack_relu2_batch_kernel
 #   Reconstructs dense tiles from the sparse representation.
 #   For each tile t in a batch of rows:
-#     D_tile = 0
 #     for each nonzero position i in tile t (from bitmask[t]):
 #         D_tile[i] = vals[prefix[t] + rank[i]]
-#   This computes: D_rowslice = gather(vals, bitmask, prefix)
-#   where D_rowslice ∈ R^{batch_rows × K} is written into dense_ptr.
 #
 #   Both kernels share the same gather + store; the only difference is the
 #   elementwise transform applied before writing: identity for _unpack_batch_kernel
@@ -191,7 +186,6 @@ def _unpack_tile_15(
     first_m_tile, grid_n_sparse,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
-    IS_BF16: tl.constexpr,
 ):
     """Gather this program's values from a continuous 15-bit stream."""
     pid = tl.program_id(0)
@@ -208,9 +202,7 @@ def _unpack_tile_15(
 
     ranks = tl.cumsum(mask_bits, 0) - 1
     base = tl.load(prefix_ptr + tile_id) + tl.load(vals_offset_ptr)
-    return load_15bit_at_indices(
-        vals_words_ptr, base + ranks, mask_bits == 1, BF16=IS_BF16
-    )
+    return load_15bit_at_indices(vals_words_ptr, base + ranks, mask_bits == 1)
 
 
 @triton.jit
@@ -277,14 +269,12 @@ def _unpack_batch_15_kernel(
     first_m_tile, grid_n_sparse, K, batch_rows,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
-    IS_BF16: tl.constexpr,
 ):
     vals = _unpack_tile_15(
         vals_words_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
         first_m_tile, grid_n_sparse,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES,
-        IS_BF16=IS_BF16,
     )
     _store_tile(dense_ptr, vals, grid_n_sparse, batch_rows, K,
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
@@ -298,14 +288,13 @@ def _unpack_relu2_batch_15_kernel(
     first_m_tile, grid_n_sparse, K, batch_rows,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
-    RELU2_SCALE: tl.constexpr, IS_BF16: tl.constexpr,
+    RELU2_SCALE: tl.constexpr,
 ):
     r = _unpack_tile_15(
         vals_words_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
         first_m_tile, grid_n_sparse,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES,
-        IS_BF16=IS_BF16,
     )
     _store_tile(dense_ptr, RELU2_SCALE * r * r, grid_n_sparse, batch_rows, K,
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
@@ -399,7 +388,7 @@ def _relu2_grad_sparse_15_kernel(
     M, N,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
-    RELU2_SCALE: tl.constexpr, IS_BF16: tl.constexpr,
+    RELU2_SCALE: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -420,9 +409,7 @@ def _relu2_grad_sparse_15_kernel(
     ranks = tl.cumsum(mask_bits, 0) - 1
     active = mask_bits == 1
     base = tl.load(prefix_ptr + tile_id) + tl.load(vals_offset_ptr)
-    r = load_15bit_at_indices(
-        vals_words_ptr, base + ranks, active, BF16=IS_BF16
-    ).to(tl.float32)
+    r = load_15bit_at_indices(vals_words_ptr, base + ranks, active).to(tl.float32)
 
     scale_2d = tl.reshape(2.0 * RELU2_SCALE * r, (BLOCK_M, BLOCK_N))
     grad_preact = tl.where(mask_2d != 0, grad * scale_2d, 0.0)

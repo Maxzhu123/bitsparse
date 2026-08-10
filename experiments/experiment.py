@@ -16,7 +16,7 @@ LAYERS = 8
 BATCH_SIZE = 10000
 DIM = 4096
 
-BASIC_MODE = True
+BASIC_MODE = False
 DATA_SPARSITY = "Sparse"        # "Normal", "Sparse", "ReLU"
 c_print(f'{DATA_SPARSITY = }', color="green")
 # ------------------------------------------------------------------------------
@@ -139,7 +139,7 @@ def evaluate(model_fn, bs, warmup_steps=1, eval_steps=5, layers=LAYERS, sp_block
         bits_per_value = 16
         buffer_size = (value_capacity * bits_per_value + 7) // 8
         buffer = TensorBuffer(
-            buffer_size, dtype=dtype, device="cuda", pack_15bit=False
+            buffer_size, dtype=dtype, device="cuda", pack_sbit=False
         )
 
     run_step(x, model, buffer, sparse=True, steps=warmup_steps)
@@ -161,7 +161,7 @@ def evaluate(model_fn, bs, warmup_steps=1, eval_steps=5, layers=LAYERS, sp_block
         bits_per_value = 15
         buffer_size = (value_capacity * bits_per_value + 7) // 8
         buffer = TensorBuffer(
-            buffer_size, dtype=dtype, device="cuda", pack_15bit=True
+            buffer_size, dtype=dtype, device="cuda", pack_sbit=True
         )
 
     run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=warmup_steps)
