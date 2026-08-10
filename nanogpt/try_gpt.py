@@ -16,7 +16,6 @@ from nanogpt import GPT
 
 
 LOG_DIR = Path("logs/2026-07-04_00-06-23")
-RESULTS_PATH = LOG_DIR / "test.csv"
 DATA_PATTERN = "data/fineweb10B/fineweb_val_*.bin"
 DATA_ROOT = Path.cwd()
 SEQUENCES_PER_BATCH = 4
@@ -112,7 +111,7 @@ def evaluate_checkpoint(
     model = GPT(
         vocab_size=vocab_size,
         num_layers=num_layers,
-        model_dim=model_dim, cfg={"bitsparse": False, "pack_15bit": True, "checkpoint": True},
+        model_dim=model_dim, cfg={"bitsparse": False, "pack_15bit": False, "checkpoint": False},
     )
     model.load_state_dict(state_dict)
     model.cuda()
@@ -141,9 +140,10 @@ def evaluate_checkpoint(
 def main() -> None:
     checkpoint = Path("/home/bubbles/Documents/bitsparse/nanogpt/logs/2026-07-04_00-06-23/3300.pt")
     print(f"data: {DATA_ROOT / DATA_PATTERN}")
+    RESULTS_PATH = LOG_DIR / "normal.csv"
     results_file_exists = RESULTS_PATH.exists()
 
-    sequence_lengths = [256, 512, 1024, 2048, 4096, 8192, 16384]
+    sequence_lengths = [256, 512, 1024, 2048, 4096, 8192, 12000, 16384]
     with RESULTS_PATH.open("a", newline="") as file:
         writer = None
         for seq_len in sequence_lengths:

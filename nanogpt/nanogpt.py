@@ -81,7 +81,7 @@ class MLP(nn.Module):
 
     def _forward_basic(self, x: Tensor):
         x = self.fc(x)
-        x = x.relu().square()
+        x = x.relu_().square()
         x = self.proj(x)
         return x
 

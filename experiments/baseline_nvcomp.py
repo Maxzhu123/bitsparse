@@ -231,9 +231,9 @@ class FFNRelu2NVCOMP(FFNRelu2ABC):
 
 
 if __name__ == "__main__":
-    from experiment import evaluate
+    from experiment import evaluate_nobase
 
-    with open("./results/relu_nvcomp.csv", "a", newline="") as f:
+    with open("./results/relu2_nvcomp_16k.csv", "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
             "method", "vram", "avg_time",
@@ -242,9 +242,10 @@ if __name__ == "__main__":
         for algo in algos:
             ALGO = algo
             print(f"Running with {ALGO}")
-            _, _, vram, time, _, _ = evaluate(FFNReluNVCOMP, bs=16000, sp_blocks=0)
-            writer.writerow([algo, vram, time])
-            f.flush()
+            for _ in range(5):
+                vram, time = evaluate_nobase(FFNRelu2NVCOMP, warmup_steps=1, eval_steps=2, bs=16000, sp_blocks=0)
+                writer.writerow([algo, vram, time])
+                f.flush()
 
             # exit(7)
 

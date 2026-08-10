@@ -153,7 +153,7 @@ class FFN(nn.Module):
     def __init__(self, in_features, comp_scale):
         super().__init__()
         self.lin1 = CompActLinear(in_features, int(in_features * 5.25), comp_scale)
-        # self.lin2 = CompActLinear(int(in_features * 5.25), in_features, comp_scale)
+        self.lin2 = CompActLinear(int(in_features * 5.25), in_features, comp_scale)
 
         # self.W2 = torch.nn.Parameter(torch.randn(in_features, int(in_features * 5.25),device="cuda", dtype=torch.bfloat16))
         # nn.init.kaiming_uniform_(self.W2, a=math.sqrt(5))
@@ -220,6 +220,7 @@ def run_test(x, model, steps, relu2):
 
 
 def main():
+    import csv
     # torch._dynamo.config.allow_unspec_int_on_nn_module = True
 
     bs = 16_000
@@ -228,9 +229,21 @@ def main():
     setup_hooks(model)
     x = torch.randn(bs, 4096, device="cuda", dtype=torch.bfloat16)
 
-    run_test(x, model, 1, relu2=True)
-    time, vram = run_test(x, model, 5, relu2=True)
-    print(f'{time=}, {vram=}')
+
+    with open("./results/relu_compact_16k.csv", "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "method", "vram", "avg_time",
+        ])
+
+        for _ in range(5):
+            run_test(x, model, 1, relu2=False)
+            time, vram = run_test(x, model, 3, relu2=False)
+            print(f'{time=}, {vram=}')
+            writer.writerow(["compact", vram, time])
+            f.flush()
+
+            # exit(7)
 
 
 if __name__ == '__main__':

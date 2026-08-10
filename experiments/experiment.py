@@ -17,7 +17,7 @@ BATCH_SIZE = 10000
 DIM = 4096
 
 BASIC_MODE = True
-DATA_SPARSITY = "Normal"        # "Normal", "Sparse", "ReLU"
+DATA_SPARSITY = "Sparse"        # "Normal", "Sparse", "ReLU"
 c_print(f'{DATA_SPARSITY = }', color="green")
 # ------------------------------------------------------------------------------
 # Evaluation Loop
@@ -46,7 +46,7 @@ def run_step(x, model, buffer=None, sparse=False, pack_15bit=False, steps=1):
     torch.cuda.synchronize()
     allocated = torch.cuda.max_memory_allocated("cuda") / 1024 ** 2
     end = time.perf_counter()
-    avg_time = (end - start) * 1000 / steps
+    avg_time = (end - start) * 1000 / max(steps, 1)
 
     # Get gradients
     with torch.no_grad():
@@ -60,7 +60,7 @@ def run_step(x, model, buffer=None, sparse=False, pack_15bit=False, steps=1):
     return tracking, allocated, avg_time
 
 
-def run_batch(model_fn, eval_steps, batch_sizes=None, sp_blocks=LAYERS, save_name="results.csv"):
+def run_batch(model_fn, warmup_steps, eval_steps, batch_sizes=None, sp_blocks=LAYERS, save_name="results.csv"):
     import csv
 
     if batch_sizes is None:
@@ -73,16 +73,16 @@ def run_batch(model_fn, eval_steps, batch_sizes=None, sp_blocks=LAYERS, save_nam
 
         if not file_exists:
             writer.writerow([
-                "batch_size", "vram_dn", "avg_time_dn", "vram", "avg_time", "vram_15bit", "avg_time_15bit",
+                "batch_size", "vram_base", "vram", "vram_15bit", "vram_ckpt", "avg_time_base", "avg_time_dn", "avg_time", "avg_time_15bit",
             ])
 
         for bs in batch_sizes:
             print("-" * 50)
             print(f'{bs = }')
 
-            vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit = evaluate(
-                model_fn, sp_blocks=sp_blocks, eval_steps=eval_steps, bs=bs)
-            writer.writerow([bs, vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit])
+            vram_base, avg_time_base, vram_ckpt, avg_time_ckpt, vram, avg_time, vram_15bit, avg_time_15bit = evaluate(
+                model_fn, sp_blocks=sp_blocks, eval_steps=eval_steps, warmup_steps=warmup_steps, bs=bs)
+            writer.writerow([bs, vram_base, vram, vram_15bit, vram_ckpt, avg_time_base, avg_time, avg_time_15bit, avg_time_ckpt])
             f.flush()
 
 
@@ -102,12 +102,12 @@ def run_layers(model_fn, bs, save_name="results.csv"):
             print("-" * 50)
             print(f'{b = }')
 
-            vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit = evaluate(model_fn, bs=bs, sp_blocks=b)
-            writer.writerow([b, vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit])
+            vram_base, avg_time_base, vram_ckpt, avg_time_ckpt, vram, avg_time, vram_15bit, avg_time_15bit = evaluate(model_fn, bs=bs, sp_blocks=b)
+            writer.writerow([bs, vram_base, vram, vram_15bit, vram_ckpt, avg_time_base, avg_time, avg_time_15bit, avg_time_ckpt])
             f.flush()
 
 
-def evaluate(model_fn, bs, eval_steps=5, layers=LAYERS, sp_blocks=LAYERS):
+def evaluate(model_fn, bs, warmup_steps=1, eval_steps=5, layers=LAYERS, sp_blocks=LAYERS):
     """Build the benchmark model, run warmup and timed steps, and print memory results."""
     # Setup parameters
     dtype = torch.bfloat16
@@ -115,14 +115,20 @@ def evaluate(model_fn, bs, eval_steps=5, layers=LAYERS, sp_blocks=LAYERS):
     x = torch.randn(bs, DIM, dtype=dtype, device="cuda", generator=G, requires_grad=True)
 
     # Our model
-    model = model_fn(layers, sp_blocks, dim=DIM, dtype=dtype)
+    model = model_fn(layers, 0, dim=DIM, dtype=dtype)
     # if not BASIC_MODE:
     setup_hooks(model)
 
-    # 1) Run baseline
-    run_step(x, model, sparse=False, steps=1)
+    # 0) Run baseline model
+    run_step(x, model, sparse=False, steps=warmup_steps)
+    _, vram_base, avg_time_base = run_step(x, model, sparse=False, steps=eval_steps)
+    print(f"Baseline: {vram_base = :.0f} MB, avg_time = {avg_time_base:.2f} ms")
+
+    # 1) Run checkpointed
+    model.sp_blocks = sp_blocks
+    run_step(x, model, sparse=False, steps=warmup_steps)
     tracking_dn, vram_dn, avg_time_dn = run_step(x, model, sparse=False, steps=eval_steps)
-    print(f"Baseline: {vram_dn = :.0f} MB, avg_time = {avg_time_dn:.2f} ms")
+    print(f"Checkpointed: {vram_dn = :.0f} MB, avg_time = {avg_time_dn:.2f} ms")
 
     # 2) Setup sparse buffer and run model (in basic mode layers allocate on-the-fly)
     buffer = None
@@ -136,7 +142,7 @@ def evaluate(model_fn, bs, eval_steps=5, layers=LAYERS, sp_blocks=LAYERS):
             buffer_size, dtype=dtype, device="cuda", pack_15bit=False
         )
 
-    run_step(x, model, buffer, sparse=True, steps=1)
+    run_step(x, model, buffer, sparse=True, steps=warmup_steps)
     tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, pack_15bit=False, steps=eval_steps)
     print(f"Compressed: {vram = :.0f} MB, avg_time = {avg_time:.2f} ms")
     # Check correctness
@@ -158,7 +164,7 @@ def evaluate(model_fn, bs, eval_steps=5, layers=LAYERS, sp_blocks=LAYERS):
             buffer_size, dtype=dtype, device="cuda", pack_15bit=True
         )
 
-    run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=1)
+    run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=warmup_steps)
     tracking, vram_15bit, avg_time_15bit = run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=eval_steps)
     print(f"Compressed 15bit: {vram_15bit = :.0f} MB, avg_time = {avg_time_15bit:.2f} ms")
     # Check correctness
@@ -168,7 +174,28 @@ def evaluate(model_fn, bs, eval_steps=5, layers=LAYERS, sp_blocks=LAYERS):
         print(f"{tracking = }")
         torch.testing.assert_close(tracking, tracking_dn, atol=3e-6, rtol=3e-6)
 
-    return vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit
+    return vram_base, avg_time_base, vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit
+
+
+def evaluate_nobase(model_fn, bs, warmup_steps=1, eval_steps=5, layers=LAYERS, sp_blocks=LAYERS):
+    """Build the benchmark model, run warmup and timed steps, and print memory results."""
+    # Setup parameters
+    dtype = torch.bfloat16
+    G = torch.Generator(device="cuda").manual_seed(0)
+    x = torch.randn(bs, DIM, dtype=dtype, device="cuda", generator=G, requires_grad=True)
+
+    # Our model
+    model = model_fn(layers, sp_blocks, dim=DIM, dtype=dtype)
+    # if not BASIC_MODE:
+    setup_hooks(model)
+
+    # 2) Setup sparse buffer and run model (in basic mode layers allocate on-the-fly)
+    run_step(x, model, None, sparse=True, steps=warmup_steps)
+    tracking, vram, avg_time = run_step(x, model, None, sparse=True, pack_15bit=False, steps=eval_steps)
+    print(f"Compressed: {vram = :.0f} MB, avg_time = {avg_time:.2f} ms")
+
+    return vram, avg_time
+
 
 
 # ------------------------------------------------------------------------------

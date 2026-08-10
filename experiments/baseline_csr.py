@@ -160,17 +160,18 @@ class FFNRelu2CSR(FFNRelu2ABC):
 
 
 if __name__ == "__main__":
-    from experiment import evaluate
+    from experiment import evaluate_nobase
 
-    with open("./results/relu_csr.csv", "a", newline="") as f:
+    with open("./results/relu2_csr_16k.csv", "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
             "method", "vram", "avg_time",
         ])
 
-        _, _, vram, time, _, _ = evaluate(FFNReluCSR, bs=16000, sp_blocks=0)
-        writer.writerow(["csr", vram, time])
-        f.flush()
+        for _ in range(5):
+            vram, time = evaluate_nobase(FFNRelu2CSR, warmup_steps=1, eval_steps=3, bs=16000, sp_blocks=0)
+            writer.writerow(["csr", vram, time])
+            f.flush()
 
             # exit(7)
 
