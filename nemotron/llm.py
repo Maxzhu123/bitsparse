@@ -771,6 +771,7 @@ class NemotronHMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
         self.act_fn = ACT2FN[config.mlp_hidden_act]
 
+    # @torch.compile()
     def _forward_ffn(self, x):
         h = self.act_fn(self.up_proj(x))
         return self.down_proj(h)
@@ -784,7 +785,7 @@ class NemotronHMLP(nn.Module):
             return out
         else:
             if self.config.use_ckpt:
-                return torch.utils.checkpoint.checkpoint(self._forward_ffn, x, use_reentrant=True)
+                return torch.utils.checkpoint.checkpoint(self._forward_ffn, x, use_reentrant=False)
             else:
                 return self._forward_ffn(x)
 
@@ -1156,6 +1157,10 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
         # Initialize weights and apply final processing
         self.post_init()
 
+    # @torch.compile()
+    def lm_head_fwd(self, x):
+        return self.lm_head(x)
+
     @can_return_tuple
     def forward(
         self,
@@ -1204,7 +1209,7 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
         hidden_states = outputs[0]
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :]).float()
+        logits = self.lm_head_fwd(hidden_states[:, slice_indices, :]).float()
 
         loss = None
         if labels is not None:
