@@ -4,9 +4,9 @@ import torch
 from torch import Tensor
 
 from lib_sparse.bitsparse import BitsparseTensor
-from lib_sparse.code.functions import dense_to_tilesparse
-from lib_sparse.code.bitpacking import packed_nbytes
-from lib_sparse.code.triton_operators import unpack_batch_
+from lib_sparse.src.functions import dense_to_tilesparse
+from lib_sparse.src.bitpacking import packed_nbytes
+from lib_sparse.src.triton_operators import unpack_batch_
 
 
 DEFAULT_SHAPES = ((1000, 4096), (4000, 4096), (15000, 4096))

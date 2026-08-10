@@ -3,9 +3,9 @@ import torch
 from torch import Tensor
 from torch.autograd import Function
 
-from .code.functions import dense_to_tilesparse
-from .code.sparse_matmul import AspB, AspRelu2B
-from .code.triton_operators import mask_with_bitmask_, relu2_grad_sparse_
+from .src.functions import dense_to_tilesparse
+from .src.sparse_matmul import AspB, AspRelu2B
+from .src.triton_operators import mask_with_bitmask_, relu2_grad_sparse_
 from .bitsparse import BitsparseTensor
 from config import RELU2_SCALE
 

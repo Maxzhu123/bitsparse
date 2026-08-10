@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 
-from .code.bitpacking import packed_nbytes
+from .src.bitpacking import packed_nbytes
 
 
 

@@ -16,7 +16,7 @@ BATCH_SIZE = 10000
 DIM = 4096
 
 BASIC_MODE = True
-DATA_SPARSITY = "Normal"
+DATA_SPARSITY = "Sparse"        # "Normal", "Sparse", "ReLU"
 c_print(f'{DATA_SPARSITY = }', color="green")
 # ------------------------------------------------------------------------------
 # Evaluation Loop
@@ -183,7 +183,7 @@ def gen_params(dim, G, dtype, expansion=5.25, device="cuda"):
         W2 = W2 - 0.01 * shift * W2.std()
     elif DATA_SPARSITY == "Sparse":
         W1 = W1 + 0.1 * W1.std()        # 80% sparsity with ReLU2
-    elif DATA_SPARSITY == "RELU":
+    elif DATA_SPARSITY == "ReLU":
         W1 = W1 + 0.1 * W1.std()        # 80% sparsity with ReLU
     else:
         raise NotImplementedError("Unknown sparsity type")
