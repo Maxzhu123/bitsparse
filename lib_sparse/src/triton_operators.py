@@ -6,12 +6,8 @@ from .triton_kernels import (
     _tile_pack_kernel,
     _compact_vals_kernel,
     _unpack_batch_kernel,
-    _unpack_batch_15_kernel,
-    _unpack_relu2_batch_kernel,
-    _unpack_relu2_batch_15_kernel,
     _relu_grad_sparse_kernel,
     _relu2_grad_sparse_kernel,
-    _relu2_grad_sparse_15_kernel,
 )
 from ..bitsparse import BitsparseTensor
 from config import RELU2_SCALE, _PACK_15BIT_CHUNK_TILES
@@ -34,7 +30,6 @@ def tile_pack(
         M, N,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES,
-        num_warps=2, num_stages=1,
     )
 
 
@@ -118,20 +113,14 @@ def unpack_batch_(
     """Unpack slice of sparse tiles into a dense output``batch_rows x K`` slice (in-place)."""
     BLOCK_M = sparse.BLOCK_M
     BLOCK_N = sparse.BLOCK_N
-    if sparse.pack_sbit:
-        _unpack_batch_15_kernel[(num_tiles_in_batch,)](
-            sparse.vals.view(-1).view(torch.uint16),
-            sparse.bitmask, sparse.prefix, sparse.vals_offset,
-            output,
-            first_m_tile, grid_n, K, batch_rows,
-            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-            TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
-        )
-        return output
+
+    vals = sparse.vals.view(torch.uint16) if sparse.pack_sbit else sparse.vals
+
     _unpack_batch_kernel[(num_tiles_in_batch,)](
-        sparse.vals, sparse.bitmask, sparse.prefix, sparse.vals_offset,
+        vals, sparse.bitmask, sparse.prefix, sparse.vals_offset,
         output,
         first_m_tile, grid_n, K, batch_rows,
+        False, 0, sparse.pack_sbit,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
     )
@@ -146,24 +135,16 @@ def unpack_relu2_batch_(
     """Unpack stored ``r = relu(a)`` tiles as ``k * r²`` into dense (in-place)."""
     BLOCK_M = sparse.BLOCK_M
     BLOCK_N = sparse.BLOCK_N
-    if sparse.pack_sbit:
-        _unpack_relu2_batch_15_kernel[(num_tiles_in_batch,)](
-            sparse.vals.view(-1).view(torch.uint16),
-            sparse.bitmask, sparse.prefix, sparse.vals_offset,
-            output,
-            first_m_tile, grid_n, K, batch_rows,
-            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-            TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
-            RELU2_SCALE=RELU2_SCALE,
-        )
-        return output
-    _unpack_relu2_batch_kernel[(num_tiles_in_batch,)](
-        sparse.vals, sparse.bitmask, sparse.prefix, sparse.vals_offset,
+
+    vals = sparse.vals.view(torch.uint16) if sparse.pack_sbit else sparse.vals
+
+    _unpack_batch_kernel[(num_tiles_in_batch,)](
+        vals, sparse.bitmask, sparse.prefix, sparse.vals_offset,
         output,
         first_m_tile, grid_n, K, batch_rows,
+        True, RELU2_SCALE, sparse.pack_sbit,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
-        RELU2_SCALE=RELU2_SCALE,
     )
     return output
 
@@ -192,20 +173,12 @@ def relu2_grad_sparse_(grad: Tensor, sparse_z: BitsparseTensor) -> Tensor:
     """
     BLOCK_M = sparse_z.BLOCK_M
     BLOCK_N = sparse_z.BLOCK_N
-    if sparse_z.pack_sbit:
-        _relu2_grad_sparse_15_kernel[(sparse_z.grid_m, sparse_z.grid_n)](
-            grad, sparse_z.vals.view(-1).view(torch.uint16),
-            sparse_z.bitmask, sparse_z.prefix, sparse_z.vals_offset,
-            sparse_z.shape[0], sparse_z.shape[1],
-            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-            TILE_NUMEL=BLOCK_M * BLOCK_N,
-            TILE_BYTES=BLOCK_M * BLOCK_N // 8,
-            RELU2_SCALE=RELU2_SCALE,
-        )
-        return grad
+    vals = sparse_z.vals.view(torch.uint16) if sparse_z.pack_sbit else sparse_z.vals
+
     _relu2_grad_sparse_kernel[(sparse_z.grid_m, sparse_z.grid_n)](
-        grad, sparse_z.vals, sparse_z.bitmask, sparse_z.prefix, sparse_z.vals_offset,
+        grad, vals, sparse_z.bitmask, sparse_z.prefix, sparse_z.vals_offset,
         sparse_z.shape[0], sparse_z.shape[1],
+        sparse_z.pack_sbit,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N,
         TILE_BYTES=BLOCK_M * BLOCK_N // 8,

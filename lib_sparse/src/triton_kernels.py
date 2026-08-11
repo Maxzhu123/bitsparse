@@ -53,17 +53,20 @@ _MASK_CONFIGS = [
 # search small: wider launches help the scan, while extra pipeline stages have
 # limited value for this memory-bound kernel.
 _COMPACT_VALS_CONFIGS = [
+    triton.Config({}, num_warps=2, num_stages=1),
     triton.Config({}, num_warps=4, num_stages=1),
     triton.Config({}, num_warps=4, num_stages=2),
-    triton.Config({}, num_warps=8, num_stages=1),
     triton.Config({}, num_warps=8, num_stages=2),
 ]
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # _tile_pack_kernel
 #   Computes:  bitmask[t] = pack(X_tile > 0)    ∀ tile t
 #              counts[t]  = ||X_tile > 0||₀     (number of positive entries)
 # ═══════════════════════════════════════════════════════════════════════════════
+@triton.autotune(
+    configs=_COMPACT_VALS_CONFIGS, key=["M", "N"],
+)
 @triton.jit
 def _tile_pack_kernel(
     dense_ptr,          # pointer to dense input X ∈ R^{M×N}
@@ -104,7 +107,7 @@ def _tile_pack_kernel(
 #   path stages that stream as 16-bit values, then packs it continuously.
 # ═══════════════════════════════════════════════════════════════════════════════
 @triton.autotune(
-    configs=_COMPACT_VALS_CONFIGS, key=["M", "N"], cache_results=True,
+    configs=_COMPACT_VALS_CONFIGS, key=["M", "N"],
 )
 @triton.jit
 def _compact_vals_kernel(
@@ -146,15 +149,13 @@ def _compact_vals_kernel(
 #     for each nonzero position i in tile t (from bitmask[t]):
 #         D_tile[i] = vals[prefix[t] + rank[i]]
 #
-#   Both kernels share the same gather + store; the only difference is the
-#   elementwise transform applied before writing: identity for _unpack_batch_kernel
-#   vs ``r → k * r²`` for _unpack_relu2_batch_kernel.
+# vals can be packed sbit or raw.
 # ═══════════════════════════════════════════════════════════════════════════════
 @triton.jit
-def _unpack_tile_16(
+def _unpack_tile(
     vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
     first_m_tile, grid_n_sparse,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+    pack_sbit: tl.constexpr,
     TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
 ):
     """Gather this program's tile values from the compact store."""
@@ -177,32 +178,11 @@ def _unpack_tile_16(
     # nonzero value sits at vals[base + rank[i]].
     base = tl.load(prefix_ptr + tile_id) + tl.load(vals_offset_ptr)
     ranks = tl.cumsum(mask_bits, 0) - 1
-    return tl.load(vals_ptr + base + ranks, mask=(mask_bits == 1), other=0.0)
 
-
-@triton.jit
-def _unpack_tile_15(
-    vals_words_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
-    first_m_tile, grid_n_sparse,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
-):
-    """Gather this program's values from a continuous 15-bit stream."""
-    pid = tl.program_id(0)
-    row_tile_in_batch = pid // grid_n_sparse
-    k_tile = pid % grid_n_sparse
-    tile_id = (first_m_tile + row_tile_in_batch) * grid_n_sparse + k_tile
-
-    byte_offs = tile_id * TILE_BYTES + tl.arange(0, TILE_BYTES)
-    bytes_val = tl.load(bitmask_ptr + byte_offs).to(tl.int32)
-    bytes_2d = tl.reshape(bytes_val, (TILE_BYTES, 1))
-    bit_pos_in_byte = tl.arange(0, 8)[None, :]
-    bits = (bytes_2d >> bit_pos_in_byte) & 1
-    mask_bits = tl.reshape(bits.to(tl.int32), (TILE_NUMEL,))
-
-    ranks = tl.cumsum(mask_bits, 0) - 1
-    base = tl.load(prefix_ptr + tile_id) + tl.load(vals_offset_ptr)
-    return load_15bit_at_indices(vals_words_ptr, base + ranks, mask_bits == 1)
+    if pack_sbit:
+        return load_15bit_at_indices(vals_ptr, base + ranks, mask_bits == 1)
+    else:
+        return tl.load(vals_ptr + base + ranks, mask=(mask_bits == 1), other=0.0)
 
 
 @triton.jit
@@ -224,79 +204,28 @@ def _store_tile(
     tl.store(dense_ptr + offs, v_2d, mask=(offs_m < batch_rows) & (offs_k < K))
 
 
-@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows"])
+@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows", "pack_sbit", "square_vals"])
 @triton.jit
 def _unpack_batch_kernel(
     vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
     dense_ptr,
     first_m_tile, grid_n_sparse, K, batch_rows,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
+    square_vals: tl.constexpr, RELU2_SCALE: tl.constexpr, pack_sbit: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
 ):
-    """Unpack stored tile values as-is into a dense ``[batch_rows, K]`` slice."""
-    vals = _unpack_tile_16(vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
-                        first_m_tile, grid_n_sparse,
-                        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                        TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES)
+    """ Unpack stored tile values as-is into a dense ``[batch_rows, K]`` slice.
+        Handles sign bit packing
+        vals can be squared if using ReLU^2 activation.
+        """
+    vals = _unpack_tile(vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
+                            first_m_tile, grid_n_sparse,
+                            pack_sbit,
+                            TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES)
+
+    if square_vals:
+        vals = RELU2_SCALE * vals * vals
+
     _store_tile(dense_ptr, vals, grid_n_sparse, batch_rows, K,
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
-
-
-@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows"])
-@triton.jit
-def _unpack_relu2_batch_kernel(
-    vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
-    dense_ptr,
-    first_m_tile, grid_n_sparse, K, batch_rows,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
-    RELU2_SCALE: tl.constexpr,
-):
-    """Unpack stored ``r = relu(a)`` tiles as ``k * r²`` into dense output."""
-    r = _unpack_tile_16(vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
-                     first_m_tile, grid_n_sparse,
-                     BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                     TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES)
-    _store_tile(dense_ptr, RELU2_SCALE * r * r, grid_n_sparse, batch_rows, K,
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
-
-
-@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows"])
-@triton.jit
-def _unpack_batch_15_kernel(
-    vals_words_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
-    dense_ptr,
-    first_m_tile, grid_n_sparse, K, batch_rows,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
-):
-    vals = _unpack_tile_15(
-        vals_words_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
-        first_m_tile, grid_n_sparse,
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-        TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES,
-    )
-    _store_tile(dense_ptr, vals, grid_n_sparse, batch_rows, K,
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
-
-
-@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows"])
-@triton.jit
-def _unpack_relu2_batch_15_kernel(
-    vals_words_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
-    dense_ptr,
-    first_m_tile, grid_n_sparse, K, batch_rows,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
-    RELU2_SCALE: tl.constexpr,
-):
-    r = _unpack_tile_15(
-        vals_words_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
-        first_m_tile, grid_n_sparse,
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-        TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES,
-    )
-    _store_tile(dense_ptr, RELU2_SCALE * r * r, grid_n_sparse, batch_rows, K,
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
 
 
@@ -344,11 +273,12 @@ def _relu_grad_sparse_kernel(
 #   Autotuned with restore_value=["grad_ptr"]: resets in-place grad between
 #   benchmark iterations so the non-idempotent transform never compounds.
 # ═══════════════════════════════════════════════════════════════════════════════
-@triton.autotune(configs=_MASK_CONFIGS, key=["M", "N"], restore_value=["grad_ptr"])
+@triton.autotune(configs=_MASK_CONFIGS, key=["M", "N", "pack_sbit"], restore_value=["grad_ptr"])
 @triton.jit
 def _relu2_grad_sparse_kernel(
     grad_ptr, vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
     M, N,
+    pack_sbit: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
     RELU2_SCALE: tl.constexpr,
@@ -374,43 +304,12 @@ def _relu2_grad_sparse_kernel(
     # r = relu(a) gathered from the compact store; dz/da = 2*k*r.
     base = tl.load(prefix_ptr + tile_id) + tl.load(vals_offset_ptr)
     ranks = tl.cumsum(mask_bits, 0) - 1
-    r = tl.load(vals_ptr + base + ranks, mask=(mask_bits == 1), other=0.0).to(tl.float32)
-    scale_2d = tl.reshape(2.0 * RELU2_SCALE * r, (BLOCK_M, BLOCK_N))
-
-    grad_preact = tl.where(mask_2d != 0, grad * scale_2d, 0.0)
-    tl.store(grad_ptr + offs, grad_preact, mask=(rm[:, None] < M) & (rn[None, :] < N))
-
-
-@triton.autotune(configs=_MASK_CONFIGS, key=["M", "N"], restore_value=["grad_ptr"])
-@triton.jit
-def _relu2_grad_sparse_15_kernel(
-    grad_ptr, vals_words_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
-    M, N,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
-    RELU2_SCALE: tl.constexpr,
-):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    grid_n = tl.num_programs(1)
-
-    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs = rm[:, None] * N + rn[None, :]
-    grad = tl.load(grad_ptr + offs, mask=(rm[:, None] < M) & (rn[None, :] < N), other=0.0)
-
-    tile_id = pid_m * grid_n + pid_n
-    byte_offs = tile_id * TILE_BYTES + tl.arange(0, TILE_BYTES)
-    bytes_val = tl.load(bitmask_ptr + byte_offs).to(tl.int32)
-    bytes_2d = tl.reshape(bytes_val, (TILE_BYTES, 1))
-    mask_bits = tl.reshape((bytes_2d >> tl.arange(0, 8)[None, :]) & 1, (TILE_NUMEL,))
-    mask_2d = tl.reshape(mask_bits, (BLOCK_M, BLOCK_N))
-
-    ranks = tl.cumsum(mask_bits, 0) - 1
     active = mask_bits == 1
-    base = tl.load(prefix_ptr + tile_id) + tl.load(vals_offset_ptr)
-    r = load_15bit_at_indices(vals_words_ptr, base + ranks, active).to(tl.float32)
+    if pack_sbit:
+        r = load_15bit_at_indices(vals_ptr, base + ranks, active)
+    else:
+        r = tl.load(vals_ptr + base + ranks, mask=active, other=0.0)
 
-    scale_2d = tl.reshape(2.0 * RELU2_SCALE * r, (BLOCK_M, BLOCK_N))
+    scale_2d = tl.reshape(2.0 * RELU2_SCALE * r.to(tl.float32), (BLOCK_M, BLOCK_N))
     grad_preact = tl.where(mask_2d != 0, grad * scale_2d, 0.0)
     tl.store(grad_ptr + offs, grad_preact, mask=(rm[:, None] < M) & (rn[None, :] < N))

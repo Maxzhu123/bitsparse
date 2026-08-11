@@ -10,7 +10,7 @@ from lib_sparse.src.triton_operators import unpack_batch_
 
 
 DEFAULT_SHAPES = ((1000, 4096), (4000, 4096), (15000, 4096))
-PACK_15BIT = True
+PACK_15BIT = False
 
 
 def generate_data(
