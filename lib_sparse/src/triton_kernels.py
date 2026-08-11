@@ -107,7 +107,7 @@ def _compact_vals_kernel(
     dense_ptr,          # input:  dense X ∈ R^{M×N}
     tile_prefix_ptr,    # input:  uint32[n_tiles+1] logical value offsets
     vals_out_ptr,       # output: compact bf16 buffer for positive values
-    layer_offset_ptr,   # input:  int64[1] global logical value offset
+    output_offest_ptr,   # input:  int64[1] global logical value offset
     first_tile, M, N, grid_n,  # chunk start, dimensions, and tile grid
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     TILE_NUMEL: tl.constexpr,
@@ -116,7 +116,7 @@ def _compact_vals_kernel(
     tile_id = first_tile + pid
     base = (tl.load(tile_prefix_ptr + tile_id)
             - tl.load(tile_prefix_ptr + first_tile)
-            + tl.load(layer_offset_ptr))
+            + tl.load(output_offest_ptr))
 
     tile_m = tile_id // grid_n
     tile_n = tile_id % grid_n

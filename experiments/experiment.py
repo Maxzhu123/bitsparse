@@ -16,7 +16,7 @@ LAYERS = 8
 BATCH_SIZE = 10000
 DIM = 4096
 
-BASIC_MODE = False
+BASIC_MODE = True
 DATA_SPARSITY = "Sparse"        # "Normal", "Sparse", "ReLU"
 c_print(f'{DATA_SPARSITY = }', color="green")
 # ------------------------------------------------------------------------------
