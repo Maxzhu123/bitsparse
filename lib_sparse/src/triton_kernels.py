@@ -24,13 +24,6 @@ from .bitpacking import load_15bit_at_indices
 # ═══════════════════════════════════════════════════════════════════════════════
 # Autotune configs for the hot kernels.
 # ═══════════════════════════════════════════════════════════════════════════════
-_MATMUL_CONFIGS = [
-    triton.Config({"BLOCK_K": 32}, num_warps=8, num_stages=2),
-    triton.Config({"BLOCK_K": 32}, num_warps=8, num_stages=3),  # previous hand-tuned
-    triton.Config({"BLOCK_K": 64}, num_warps=8, num_stages=2),
-    triton.Config({"BLOCK_K": 128}, num_warps=4, num_stages=3),
-]
-
 # Memory-bound gather kernels: configs are keyed on the dense output shape so
 # each distinct tile-grid / batch size benchmarks once.
 _UNPACK_CONFIGS = [
