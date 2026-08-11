@@ -206,7 +206,7 @@ class FFNReluNVCOMP(FFNReluABC):
         super().__init__(dtype, layers, sp_blocks, dim)
         self.compressor = Compressor(ALGO)
 
-    def forward(self, x, pack_15bit, buffer):
+    def forward(self, x, pack_sbit, buffer):
         """Run the residual FFN stack while allocating sparse storage for this pass."""
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
@@ -221,7 +221,7 @@ class FFNRelu2NVCOMP(FFNRelu2ABC):
         super().__init__(dtype, layers, sp_blocks, dim)
         self.compressor = Compressor(ALGO)
 
-    def forward(self, x, pack_15bit, buffer):
+    def forward(self, x, pack_sbit, buffer):
         """Run the residual FFN stack while allocating sparse storage for this pass."""
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
@@ -248,4 +248,3 @@ if __name__ == "__main__":
                 f.flush()
 
             # exit(7)
-

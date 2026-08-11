@@ -10,7 +10,7 @@ from lib_sparse.src.triton_operators import unpack_batch_
 
 
 DEFAULT_SHAPES = ((1000, 4096), (4000, 4096), (15000, 4096))
-PACK_15BIT = False
+PACK_SBIT = False
 
 
 def generate_data(
@@ -45,10 +45,10 @@ def decompress(sparse: BitsparseTensor) -> Tensor:
     return output
 
 
-def compress_batch(tensors: list[Tensor], pack_15bit: bool) -> list[BitsparseTensor]:
+def compress_batch(tensors: list[Tensor], pack_sbit: bool) -> list[BitsparseTensor]:
     """Compress every dense tensor in a batch."""
     return [
-        dense_to_tilesparse(tensor, pack_15bit=pack_15bit)
+        dense_to_tilesparse(tensor, pack_sbit=pack_sbit)
         for tensor in tensors
     ]
 
@@ -59,11 +59,11 @@ def decompress_batch(tensors: list[BitsparseTensor]) -> list[Tensor]:
 
 
 def benchmark_shape(
-    tensors: list[Tensor], iters: int, warmup: int, pack_15bit: bool
+    tensors: list[Tensor], iters: int, warmup: int, pack_sbit: bool
 ) -> tuple[list[BitsparseTensor], list[Tensor], float, float, float]:
     """Time batched compression followed by batched decompression."""
     for _ in range(warmup):
-        compressed = compress_batch(tensors, pack_15bit)
+        compressed = compress_batch(tensors, pack_sbit)
         decompressed = decompress_batch(compressed)
     torch.cuda.synchronize()
 
@@ -76,7 +76,7 @@ def benchmark_shape(
         decompress_end = torch.cuda.Event(enable_timing=True)
 
         compress_start.record()
-        compressed = compress_batch(tensors, pack_15bit)
+        compressed = compress_batch(tensors, pack_sbit)
         compress_end.record()
         decompressed = decompress_batch(compressed)
         decompress_end.record()
@@ -102,7 +102,7 @@ def main() -> None:
 
     generator = torch.Generator(device=device).manual_seed(0)
     total_roundtrip_ms = 0.0
-    print(f"  Pack_15bit={PACK_15BIT}")
+    print(f"  Pack_sbit={PACK_SBIT}")
 
     for sparsity in sp_ratios:
         print(f"  Target_sparsity={sparsity:.1%}")
@@ -110,7 +110,7 @@ def main() -> None:
             tensors = [generate_data(shape, generator, dtype, device, sparsity) for _ in range(n)]
 
             compressed, decompressed, compress_ms, decompress_ms, roundtrip_ms = benchmark_shape(
-                tensors, iters, warmup, PACK_15BIT
+                tensors, iters, warmup, PACK_SBIT
             )
 
             # Correctness check
@@ -120,7 +120,7 @@ def main() -> None:
             storage_ratios = []
             for ct, original in zip(compressed, tensors):
                 nnz = ct.prefix[-1].item()
-                value_bytes = ct.vram_size() #packed_nbytes(nnz) if ct.pack_15bit else nnz * original.element_size()
+                value_bytes = ct.vram_size() #packed_nbytes(nnz) if ct.pack_sbit else nnz * original.element_size()
                 storage_ratio = value_bytes / (original.numel() * original.element_size())
                 storage_ratios.append(storage_ratio)
             storage_ratio = sum(storage_ratios) / n

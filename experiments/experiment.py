@@ -22,7 +22,7 @@ c_print(f'{DATA_SPARSITY = }', color="green")
 # ------------------------------------------------------------------------------
 # Evaluation Loop
 # ------------------------------------------------------------------------------
-def run_step(x, model, buffer=None, sparse=False, pack_15bit=False, steps=1):
+def run_step(x, model, buffer=None, sparse=False, pack_sbit=False, steps=1):
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
@@ -35,7 +35,7 @@ def run_step(x, model, buffer=None, sparse=False, pack_15bit=False, steps=1):
         model.zero_grad()
         torch.cuda.reset_peak_memory_stats("cuda")
         if sparse:
-            y = model.forward(x, pack_15bit, buffer)
+            y = model.forward(x, pack_sbit, buffer)
         else:
             y = model.forward_base(x)
         loss = (y - x).abs().mean()
@@ -143,7 +143,7 @@ def evaluate(model_fn, bs, warmup_steps=1, eval_steps=5, layers=LAYERS, sp_block
         )
 
     run_step(x, model, buffer, sparse=True, steps=warmup_steps)
-    tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, pack_15bit=False, steps=eval_steps)
+    tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, pack_sbit=False, steps=eval_steps)
     print(f"Compressed: {vram = :.0f} MB, avg_time = {avg_time:.2f} ms")
     # Check correctness
     if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
@@ -164,8 +164,8 @@ def evaluate(model_fn, bs, warmup_steps=1, eval_steps=5, layers=LAYERS, sp_block
             buffer_size, dtype=dtype, device="cuda", pack_sbit=True
         )
 
-    run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=warmup_steps)
-    tracking, vram_15bit, avg_time_15bit = run_step(x, model, buffer, sparse=True, pack_15bit=True, steps=eval_steps)
+    run_step(x, model, buffer, sparse=True, pack_sbit=True, steps=warmup_steps)
+    tracking, vram_15bit, avg_time_15bit = run_step(x, model, buffer, sparse=True, pack_sbit=True, steps=eval_steps)
     print(f"Compressed 15bit: {vram_15bit = :.0f} MB, avg_time = {avg_time_15bit:.2f} ms")
     # Check correctness
     if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
@@ -191,7 +191,7 @@ def evaluate_nobase(model_fn, bs, warmup_steps=1, eval_steps=5, layers=LAYERS, s
 
     # 2) Setup sparse buffer and run model (in basic mode layers allocate on-the-fly)
     run_step(x, model, None, sparse=True, steps=warmup_steps)
-    tracking, vram, avg_time = run_step(x, model, None, sparse=True, pack_15bit=False, steps=eval_steps)
+    tracking, vram, avg_time = run_step(x, model, None, sparse=True, pack_sbit=False, steps=eval_steps)
     print(f"Compressed: {vram = :.0f} MB, avg_time = {avg_time:.2f} ms")
 
     return vram, avg_time
@@ -371,4 +371,3 @@ class FFNRelu2ABC(nn.Module):
             else:
                 x = x + FFNRelu2_2.apply(x_inner, W1, W2)
         return x
-

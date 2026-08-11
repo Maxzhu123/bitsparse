@@ -47,7 +47,7 @@ def _prepare_tiles(dense: Tensor) -> _PreparedTiles:
 def dense_to_tilesparse(
     dense: Tensor,
     sparse_data: TensorBuffer | None = None,
-    pack_15bit: bool = False,
+    pack_sbit: bool = False,
 ) -> BitsparseTensor:
     """Convert dense tensor into a BitsparseTensor."""
     prepared = _prepare_tiles(dense)
@@ -61,7 +61,7 @@ def dense_to_tilesparse(
         vals_offset = None
     else:
         vals = sparse_data.vals
-        if pack_15bit:
+        if pack_sbit:
             # Eight logical values occupy exactly fifteen bytes. Aligning each
             # activation keeps independent pack launches from sharing bytes.
             vals_offset = ((sparse_data.offset + 7) // 8 * 8).clone()
@@ -71,7 +71,7 @@ def dense_to_tilesparse(
     vals, vals_offset = compact_vals(
         dense, tile_prefix, vals, vals_offset,
         M, N, grid_n, num_tiles, BLOCK_M, BLOCK_N, TILE_NUMEL,
-        pack_15bit,
+        pack_sbit,
     )
 
     if sparse_data is not None:
@@ -80,6 +80,6 @@ def dense_to_tilesparse(
     return BitsparseTensor(
         vals, tile_bitmasks, tile_prefix,
         grid_m, grid_n, BLOCK_M, BLOCK_N, dense.shape,
-        vals_offset=vals_offset, pack_sbit=pack_15bit,
+        vals_offset=vals_offset, pack_sbit=pack_sbit,
         value_dtype=dense.dtype,
     )

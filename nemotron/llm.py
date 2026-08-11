@@ -74,7 +74,7 @@ class NemotronHConfig(PreTrainedConfig):
     sparse_ffn: bool = False
     use_ckpt: bool = False
     sparse_data: TensorBuffer | None = None
-    pack_15bit: bool = False
+    pack_sbit: bool = False
 
     def __post_init__(self, **kwargs):
         # Backward compatibility; configs expect different names for these fields when init
@@ -780,7 +780,7 @@ class NemotronHMLP(nn.Module):
         if self.config.sparse_ffn:
             W1 = self.up_proj.weight
             W2 = self.down_proj.weight
-            out = FFNRelu2.apply(x, W1, W2, sparse_data=self.config.sparse_data, pack_15bit=self.config.pack_15bit)
+            out = FFNRelu2.apply(x, W1, W2, sparse_data=self.config.sparse_data, pack_sbit=self.config.pack_sbit)
             #out = FFNSparseRelu2.apply(x, W1, W2, self.config.sparse_data)
             return out
         else:

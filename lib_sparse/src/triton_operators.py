@@ -37,7 +37,7 @@ def compact_vals(
     dense: Tensor, tile_prefix: Tensor,
     vals: Tensor | None, vals_offset: Tensor | None,
     M: int, N: int, grid_n: int, num_tiles: int,
-    BLOCK_M: int, BLOCK_N: int, TILE_NUMEL: int, pack_15bit: bool,
+    BLOCK_M: int, BLOCK_N: int, TILE_NUMEL: int, pack_sbit: bool,
 ) -> tuple[Tensor, Tensor]:
     """ Compact positive values into standalone or preallocated storage.
         Supports 15-bit packing and preallocated vals buffer. """
@@ -46,12 +46,12 @@ def compact_vals(
     if standalone:
         nnz = int(tile_prefix[-1].item())
         staging_numel = nnz
-        size = packed_storage_nbytes(nnz) if pack_15bit else nnz
-        dtype = torch.uint8 if pack_15bit else dense.dtype
+        size = packed_storage_nbytes(nnz) if pack_sbit else nnz
+        dtype = torch.uint8 if pack_sbit else dense.dtype
         vals = torch.empty(size, device=dense.device, dtype=dtype)
         vals_offset = torch.zeros((), device=dense.device, dtype=torch.int64)
 
-    if pack_15bit:
+    if pack_sbit:
         chunk_tiles = min(num_tiles, _PACK_15BIT_CHUNK_TILES)
         chunk_numels = None
         if standalone:

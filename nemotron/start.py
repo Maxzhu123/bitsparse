@@ -54,7 +54,7 @@ def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
     model.config.use_ckpt = True
     # sparse_data = TensorBuffer(60_000_000)
     sparse_data = None
-    model.config.pack_15bit = False
+    model.config.pack_sbit = False
     model.config.sparse_data = sparse_data
 
     c_print(f'{train_tokens=}, sparse={model.config.sparse_ffn}', color="bright_yellow")
