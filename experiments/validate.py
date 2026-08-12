@@ -8,6 +8,7 @@ from lib_sparse.src.triton_operators import unpack_batch_
 
 SHAPES = ((128, 128), (129, 131))
 SPARSITIES = (0.0, 0.5, 0.9, 1.0)
+VALIDATION_DTYPE = torch.bfloat16
 
 
 def generate_data(
@@ -48,11 +49,15 @@ def decompress(sparse: BitsparseTensor) -> Tensor:
 
 def validate_sparse(dense: Tensor, sparse: BitsparseTensor) -> None:
     restored = decompress(sparse)
-    torch.testing.assert_close(restored, dense, rtol=0, atol=0)
-    assert int(sparse.nnz().item()) == int((dense > 0).sum().item())
+    assert torch.equal(restored, dense)
+    assert int(sparse.nnz().item()) == int((dense.float() > 0).sum().item())
 
 
-def make_buffer(tensors: list[Tensor], pack_sbit: bool) -> TensorBuffer:
+def make_buffer(
+    tensors: list[Tensor],
+    storage_dtype: torch.dtype,
+    pack_sbit: bool,
+) -> TensorBuffer:
     """Allocate enough shared storage for every tensor's worst-case NNZ count."""
     capacity = sum(tensor.numel() for tensor in tensors)
     if pack_sbit:
@@ -60,13 +65,25 @@ def make_buffer(tensors: list[Tensor], pack_sbit: bool) -> TensorBuffer:
         capacity += 7 * len(tensors)
         size = (capacity * 15 + 7) // 8
     else:
-        size = capacity * tensors[0].element_size()
+        size = capacity * torch.empty((), dtype=storage_dtype).element_size()
     return TensorBuffer(
         size,
         device="cuda",
-        dtype=torch.bfloat16,
+        dtype=storage_dtype,
         pack_sbit=pack_sbit,
     )
+
+
+def compress(
+    dense: Tensor,
+    storage_dtype: torch.dtype,
+    pack_sbit: bool,
+    buffer: TensorBuffer | None = None,
+) -> BitsparseTensor:
+    kwargs = {"sparse_data": buffer, "pack_sbit": pack_sbit}
+    if storage_dtype != torch.bfloat16:
+        kwargs["storage_dtype"] = storage_dtype
+    return dense_to_tilesparse(dense, **kwargs)
 
 
 def main() -> None:
@@ -75,9 +92,14 @@ def main() -> None:
 
     generator = torch.Generator(device="cuda").manual_seed(0)
     passed = 0
-    total_checks = len(SHAPES) * len(SPARSITIES) * 2 * 2
+    pack_sbit_options = (
+        (False, True) if VALIDATION_DTYPE == torch.bfloat16 else (False,)
+    )
+    total_checks = (
+        len(SHAPES) * len(SPARSITIES) * len(pack_sbit_options) * 2
+    )
 
-    for pack_sbit in (False, True):
+    for pack_sbit in pack_sbit_options:
         tensors = [
             generate_data(shape, generator, sparsity)
             for shape in SHAPES
@@ -86,16 +108,16 @@ def main() -> None:
 
         # Validate standalone allocations.
         for dense in tensors:
-            sparse = dense_to_tilesparse(dense, pack_sbit=pack_sbit)
+            sparse = compress(dense, VALIDATION_DTYPE, pack_sbit)
             validate_sparse(dense, sparse)
             passed += 1
 
         # Validate several tensors sharing one preallocated value buffer. Keep
         # every sparse tensor alive and decompress after all writes so offsets
         # and non-overlapping allocations are covered.
-        buffer = make_buffer(tensors, pack_sbit)
+        buffer = make_buffer(tensors, VALIDATION_DTYPE, pack_sbit)
         compressed = [
-            dense_to_tilesparse(dense, sparse_data=buffer, pack_sbit=pack_sbit)
+            compress(dense, VALIDATION_DTYPE, pack_sbit, buffer)
             for dense in tensors
         ]
         for dense, sparse in zip(tensors, compressed):
@@ -104,7 +126,10 @@ def main() -> None:
             passed += 1
 
         for shape in SHAPES:
-            print(f"passed shape={shape}, pack_sbit={pack_sbit}")
+            print(
+                f"passed shape={shape}, storage_dtype={VALIDATION_DTYPE}, "
+                f"pack_sbit={pack_sbit}"
+            )
 
     print(f"Passed: {passed}")
     print(f"Total checks: {total_checks}")
