@@ -23,10 +23,16 @@ def generate_data(
     device: str,
     sparsity: float,
 ) -> Tensor:
-    """Create a non-negative dense matrix with approximately ``sparsity`` zeros."""
-    data = torch.randn(shape, generator=generator, dtype=dtype, device=device).abs_()
+    """Create a non-negative dense matrix with approximately ``sparsity`` zeros.
+
+    Data is generated in BF16 (``randn`` has no FP8 kernel) and cast to the
+    requested dtype, so FP8 inputs round-trip through storage losslessly.
+    """
+    data = torch.randn(shape, generator=generator, dtype=torch.bfloat16, device=device).abs_()
     zero_mask = torch.rand(shape, generator=generator, device=device) < sparsity
     data.masked_fill_(zero_mask, 0)
+    if dtype != torch.bfloat16:
+        data = data.to(dtype)
     return data
 
 
@@ -115,7 +121,7 @@ def main() -> None:
     sp_ratios = [0.5, 0.8]
     iters = 32
     warmup = 5
-    dtype = torch.bfloat16
+    dtype = BENCHMARK_DTYPE
     device = "cuda"
 
     generator = torch.Generator(device=device).manual_seed(0)
