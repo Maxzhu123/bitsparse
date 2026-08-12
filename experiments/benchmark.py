@@ -5,7 +5,6 @@ from torch import Tensor
 
 from lib_sparse.bitsparse import BitsparseTensor
 from lib_sparse.src.functions import dense_to_tilesparse
-from lib_sparse.src.bitpacking import packed_nbytes
 from lib_sparse.src.triton_operators import unpack_batch_
 
 

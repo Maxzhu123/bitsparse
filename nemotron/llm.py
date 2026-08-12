@@ -781,7 +781,6 @@ class NemotronHMLP(nn.Module):
             W1 = self.up_proj.weight
             W2 = self.down_proj.weight
             out = FFNRelu2.apply(x, W1, W2, sparse_data=self.config.sparse_data, pack_sbit=self.config.pack_sbit)
-            #out = FFNSparseRelu2.apply(x, W1, W2, self.config.sparse_data)
             return out
         else:
             if self.config.use_ckpt:
