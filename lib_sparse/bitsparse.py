@@ -30,8 +30,6 @@ class BitsparseTensor:
         self.pack_sbit = pack_sbit
         self.value_dtype = vals.dtype if value_dtype is None else value_dtype
         self.output_dtype = self.value_dtype if output_dtype is None else output_dtype
-        if scale is None:
-            scale = torch.tensor(1.0, device=vals.device, dtype=torch.float32)
         self.scale = scale
         self.grid_m = grid_m
         self.grid_n = grid_n

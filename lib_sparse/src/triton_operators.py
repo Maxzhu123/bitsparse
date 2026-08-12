@@ -34,7 +34,7 @@ def tile_pack(
 
 
 def compact_vals(
-    dense: Tensor, tile_prefix: Tensor,
+    dense: Tensor, tile_bitmasks: Tensor, tile_prefix: Tensor,
     vals: Tensor | None, vals_offset: Tensor | None,
     M: int, N: int, grid_n: int, num_tiles: int,
     BLOCK_M: int, BLOCK_N: int, TILE_NUMEL: int, pack_sbit: bool,
@@ -43,7 +43,9 @@ def compact_vals(
 ) -> tuple[Tensor, Tensor]:
     """ Compact positive values into standalone or preallocated storage.
         Supports 15-bit packing, FP8 quantization, and preallocated vals buffer. """
-    quantize = storage_dtype == torch.float8_e4m3fn
+    if storage_dtype == torch.float8_e4m3fn:
+        # Pre-quantize outside the kernel; the compaction kernel is dtype-agnostic.
+        dense = (dense.detach() / scale).to(torch.float8_e4m3fn)
     staging_numel = dense.numel()
     standalone = vals is None
     if standalone:
@@ -79,11 +81,10 @@ def compact_vals(
             tiles_in_chunk = min(chunk_tiles, num_tiles - first_tile)
             # Compact to workspace offset zero, then append to the packed stream.
             _compact_vals_kernel[(tiles_in_chunk,)](
-                dense, tile_prefix, raw_vals, tile_prefix,
+                dense, tile_bitmasks, tile_prefix, raw_vals, tile_prefix,
                 first_tile, M, N, grid_n,
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-                TILE_NUMEL=TILE_NUMEL,
-                quantize=quantize, scale_ptr=scale,
+                TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_NUMEL // 8,
             )
             launch_numel = (
                 chunk_numels[chunk_index]
@@ -101,11 +102,10 @@ def compact_vals(
 
     # Normal version version
     _compact_vals_kernel[(num_tiles,)](
-        dense, tile_prefix, vals, vals_offset,
+        dense, tile_bitmasks, tile_prefix, vals, vals_offset,
         0, M, N, grid_n,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-        TILE_NUMEL=TILE_NUMEL,
-        quantize=quantize, scale_ptr=scale,
+        TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_NUMEL // 8,
     )
     return vals, vals_offset
 
@@ -125,10 +125,12 @@ def unpack_batch_(
         vals, sparse.bitmask, sparse.prefix, sparse.vals_offset,
         output,
         first_m_tile, grid_n, K, batch_rows,
-        False, 0, sparse.pack_sbit, sparse.fp8, sparse.scale,
+        False, 0, sparse.pack_sbit, sparse.fp8,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
     )
+    if sparse.fp8:
+        output.mul_(sparse.scale)
     return output
 
 
@@ -147,10 +149,12 @@ def unpack_relu2_batch_(
         vals, sparse.bitmask, sparse.prefix, sparse.vals_offset,
         output,
         first_m_tile, grid_n, K, batch_rows,
-        True, RELU2_SCALE, sparse.pack_sbit, sparse.fp8, sparse.scale,
+        True, RELU2_SCALE, sparse.pack_sbit, sparse.fp8,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
     )
+    if sparse.fp8:
+        output.mul_(sparse.scale.square())
     return output
 
 
@@ -183,10 +187,12 @@ def relu2_grad_sparse_(grad: Tensor, sparse_z: BitsparseTensor) -> Tensor:
     _relu2_grad_sparse_kernel[(sparse_z.grid_m, sparse_z.grid_n)](
         grad, vals, sparse_z.bitmask, sparse_z.prefix, sparse_z.vals_offset,
         sparse_z.shape[0], sparse_z.shape[1],
-        sparse_z.pack_sbit, sparse_z.fp8, sparse_z.scale,
+        sparse_z.pack_sbit, sparse_z.fp8,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N,
         TILE_BYTES=BLOCK_M * BLOCK_N // 8,
         RELU2_SCALE=RELU2_SCALE,
     )
+    if sparse_z.fp8:
+        grad.mul_(sparse_z.scale)
     return grad

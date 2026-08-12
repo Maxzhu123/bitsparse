@@ -104,14 +104,14 @@ def _tile_pack_kernel(
 )
 @triton.jit
 def _compact_vals_kernel(
-    dense_ptr,          # input:  dense X ∈ R^{M×N}
+    dense_ptr,          # input:  dense X ∈ R^{M×N} (BF16 or pre-quantized FP8)
+    tile_bitmasks_ptr,  # input:  uint8[n_tiles × TILE_BYTES] packed bitmasks
     tile_prefix_ptr,    # input:  uint32[n_tiles+1] logical value offsets
     vals_out_ptr,       # output: compact value buffer for positive values
     output_offest_ptr,   # input:  int64[1] global logical value offset
     first_tile, M, N, grid_n,  # chunk start, dimensions, and tile grid
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    TILE_NUMEL: tl.constexpr,
-    quantize: tl.constexpr, scale_ptr,  # FP8 storage: divide by scale before rounding
+    TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
 ):
     pid = tl.program_id(0)
     tile_id = first_tile + pid
@@ -128,16 +128,19 @@ def _compact_vals_kernel(
     v_2d = tl.load(dense_ptr + offs, mask=(rm[:, None] < M) & (rn[None, :] < N), other=0.0)
     v = tl.reshape(v_2d, (TILE_NUMEL,))
 
-    nz = (v > 0.0).to(tl.int32)
+    # The nonzero mask comes from the packed bitmask, which was computed from
+    # the original BF16 values.  Positives rounded to zero in FP8 therefore
+    # still scatter into the stream, keeping counts consistent with the prefix.
+    byte_offs = tile_id * TILE_BYTES + tl.arange(0, TILE_BYTES)
+    bytes_val = tl.load(tile_bitmasks_ptr + byte_offs).to(tl.int32)
+    bytes_2d = tl.reshape(bytes_val, (TILE_BYTES, 1))
+    bits = (bytes_2d >> tl.arange(0, 8)[None, :]) & 1
+    mask_bits = tl.reshape(bits.to(tl.int32), (TILE_NUMEL,))
 
     # rank[i] = number of nonzero entries before position i within this tile.
     # Used as the offset from 'base' to write the i-th nonzero value.
-    ranks = tl.cumsum(nz, 0) - 1
-    if quantize:
-        # Promote to fp32, then round fp8.  The bitmask above is computed from
-        # the original BF16 values, so positives rounded to zero keep their mask.
-        v = (v.to(tl.float32) / tl.load(scale_ptr)).to(tl.float8e4nv)
-    tl.store(vals_out_ptr + base + ranks, v, mask=(nz == 1))
+    ranks = tl.cumsum(mask_bits, 0) - 1
+    tl.store(vals_out_ptr + base + ranks, v, mask=(mask_bits == 1))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -153,7 +156,7 @@ def _compact_vals_kernel(
 def _unpack_tile(
     vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
     first_m_tile, grid_n_sparse,
-    pack_sbit: tl.constexpr, fp8: tl.constexpr, scale_ptr,
+    pack_sbit: tl.constexpr,
     TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
 ):
     """Gather this program's tile values from the compact store."""
@@ -179,11 +182,8 @@ def _unpack_tile(
 
     if pack_sbit:
         return load_15bit_at_indices(vals_ptr, base + ranks, mask_bits == 1)
-    elif fp8:
-        # Promote to fp32 before dequantizing so downstream math stays in fp32.
-        q = tl.load(vals_ptr + base + ranks, mask=(mask_bits == 1), other=0.0)
-        return q.to(tl.float32) * tl.load(scale_ptr)
     else:
+        # The store dtype follows the pointer: raw BF16 or FP8.
         return tl.load(vals_ptr + base + ranks, mask=(mask_bits == 1), other=0.0)
 
 
@@ -213,7 +213,7 @@ def _unpack_batch_kernel(
     dense_ptr,
     first_m_tile, grid_n_sparse, K, batch_rows,
     square_vals: tl.constexpr, RELU2_SCALE: tl.constexpr, pack_sbit: tl.constexpr,
-    fp8: tl.constexpr, scale_ptr,
+    fp8: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
 ):
     """ Unpack stored tile values as-is into a dense ``[batch_rows, K]`` slice.
@@ -222,11 +222,15 @@ def _unpack_batch_kernel(
         """
     vals = _unpack_tile(vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
                             first_m_tile, grid_n_sparse,
-                            pack_sbit, fp8, scale_ptr,
+                            pack_sbit,
                             TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES)
 
     if square_vals:
-        vals = RELU2_SCALE * vals * vals
+        # FP8 promotes to fp32 before squaring; BF16 squares in its own dtype.
+        if fp8:
+            vals = RELU2_SCALE * vals.to(tl.float32) * vals.to(tl.float32)
+        else:
+            vals = RELU2_SCALE * vals * vals
 
     _store_tile(dense_ptr, vals, grid_n_sparse, batch_rows, K,
                 BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)
@@ -281,7 +285,7 @@ def _relu_grad_sparse_kernel(
 def _relu2_grad_sparse_kernel(
     grad_ptr, vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
     M, N,
-    pack_sbit: tl.constexpr, fp8: tl.constexpr, scale_ptr,
+    pack_sbit: tl.constexpr, fp8: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
     RELU2_SCALE: tl.constexpr,
@@ -311,7 +315,8 @@ def _relu2_grad_sparse_kernel(
     if pack_sbit:
         r = load_15bit_at_indices(vals_ptr, base + ranks, active)
     elif fp8:
-        r = tl.load(vals_ptr + base + ranks, mask=active, other=0.0).to(tl.float32) * tl.load(scale_ptr)
+        # Promote to fp32 before the derivative; the scale is applied outside.
+        r = tl.load(vals_ptr + base + ranks, mask=active, other=0.0).to(tl.float32)
     else:
         r = tl.load(vals_ptr + base + ranks, mask=active, other=0.0)
 
