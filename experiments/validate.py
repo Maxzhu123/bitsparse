@@ -1,3 +1,5 @@
+import os
+
 import torch
 from torch import Tensor
 
@@ -8,7 +10,9 @@ from lib_sparse.src.triton_operators import unpack_batch_
 
 SHAPES = ((128, 128), (129, 131))
 SPARSITIES = (0.0, 0.5, 0.9, 1.0)
-VALIDATION_DTYPE = torch.bfloat16
+VALIDATION_DTYPE = getattr(
+    torch, os.environ.get("VALIDATION_DTYPE", "bfloat16")
+)
 
 
 def generate_data(
@@ -34,7 +38,7 @@ def decompress(sparse: BitsparseTensor) -> Tensor:
     output = torch.empty(
         (rows, columns),
         device=sparse.vals.device,
-        dtype=sparse.value_dtype,
+        dtype=sparse.output_dtype,
     )
     return unpack_batch_(
         sparse,
@@ -49,7 +53,17 @@ def decompress(sparse: BitsparseTensor) -> Tensor:
 
 def validate_sparse(dense: Tensor, sparse: BitsparseTensor) -> None:
     restored = decompress(sparse)
-    assert torch.equal(restored, dense)
+    if sparse.fp8:
+        # Scaled FP8 rounds to the nearest e4m3 step, so compare within the
+        # quantization error instead of demanding exact equality.
+        torch.testing.assert_close(
+            restored,
+            dense,
+            rtol=0.1,
+            atol=sparse.scale.item() * 0.1,
+        )
+    else:
+        torch.testing.assert_close(restored, dense, rtol=0, atol=0)
     assert int(sparse.nnz().item()) == int((dense.float() > 0).sum().item())
 
 

@@ -30,7 +30,7 @@ def decompress(sparse: BitsparseTensor) -> Tensor:
     """Decompress all tiles in ``sparse`` into a newly allocated dense tensor."""
     rows, columns = sparse.shape
     output = torch.empty(
-        (rows, columns), device=sparse.vals.device, dtype=sparse.value_dtype
+        (rows, columns), device=sparse.vals.device, dtype=sparse.output_dtype
     )
     unpack_batch_(
         sparse,

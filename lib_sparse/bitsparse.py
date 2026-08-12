@@ -4,7 +4,6 @@ from torch import Tensor
 from .src.bitpacking import packed_nbytes
 
 
-
 class BitsparseTensor:
     """Tile-wise bitmask sparse tensor for a dense matrix of shape ``shape``.
     """
@@ -19,7 +18,8 @@ class BitsparseTensor:
 
     def __init__(self, vals, bitmask, prefix,
                  grid_m, grid_n, BLOCK_M, BLOCK_N, shape,
-                 vals_offset=None, pack_sbit=False, value_dtype=None):
+                 vals_offset=None, pack_sbit=False, value_dtype=None,
+                 output_dtype=None, scale=None):
         """Store compressed values and tile metadata for later unpack/masking."""
         self.vals = vals
         self.bitmask = bitmask
@@ -29,11 +29,20 @@ class BitsparseTensor:
         self.vals_offset = vals_offset
         self.pack_sbit = pack_sbit
         self.value_dtype = vals.dtype if value_dtype is None else value_dtype
+        self.output_dtype = self.value_dtype if output_dtype is None else output_dtype
+        if scale is None:
+            scale = torch.tensor(1.0, device=vals.device, dtype=torch.float32)
+        self.scale = scale
         self.grid_m = grid_m
         self.grid_n = grid_n
         self.BLOCK_M = BLOCK_M
         self.BLOCK_N = BLOCK_N
         self.shape = shape
+
+    @property
+    def fp8(self) -> bool:
+        """True when values are stored as FP8 (e4m3) instead of BF16."""
+        return self.value_dtype == torch.float8_e4m3fn
 
     def __repr__(self):
         return (f"BitsparseTensor(shape={list(self.shape)}, "
@@ -65,9 +74,15 @@ class TensorBuffer:
         """ size: number of storage bytes in buffer
             device: device of buffer
             dtype: logical datatype of stored values"""
+        if pack_sbit and dtype != torch.bfloat16:
+            raise ValueError(
+                "pack_sbit uses the BF16-specific 15-bit codec and cannot be "
+                f"combined with dtype {dtype}"
+            )
         self.size = size
         self.device = device
         self.dtype = dtype
+        self.pack_sbit = pack_sbit
 
         # Init storage tensors
         if pack_sbit:

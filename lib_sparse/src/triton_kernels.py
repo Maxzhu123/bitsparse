@@ -106,11 +106,12 @@ def _tile_pack_kernel(
 def _compact_vals_kernel(
     dense_ptr,          # input:  dense X ∈ R^{M×N}
     tile_prefix_ptr,    # input:  uint32[n_tiles+1] logical value offsets
-    vals_out_ptr,       # output: compact bf16 buffer for positive values
+    vals_out_ptr,       # output: compact value buffer for positive values
     output_offest_ptr,   # input:  int64[1] global logical value offset
     first_tile, M, N, grid_n,  # chunk start, dimensions, and tile grid
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     TILE_NUMEL: tl.constexpr,
+    quantize: tl.constexpr, scale_ptr,  # FP8 storage: divide by scale before rounding
 ):
     pid = tl.program_id(0)
     tile_id = first_tile + pid
@@ -132,6 +133,10 @@ def _compact_vals_kernel(
     # rank[i] = number of nonzero entries before position i within this tile.
     # Used as the offset from 'base' to write the i-th nonzero value.
     ranks = tl.cumsum(nz, 0) - 1
+    if quantize:
+        # Promote to fp32, then round fp8.  The bitmask above is computed from
+        # the original BF16 values, so positives rounded to zero keep their mask.
+        v = (v.to(tl.float32) / tl.load(scale_ptr)).to(tl.float8e4nv)
     tl.store(vals_out_ptr + base + ranks, v, mask=(nz == 1))
 
 
@@ -148,7 +153,7 @@ def _compact_vals_kernel(
 def _unpack_tile(
     vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
     first_m_tile, grid_n_sparse,
-    pack_sbit: tl.constexpr,
+    pack_sbit: tl.constexpr, fp8: tl.constexpr, scale_ptr,
     TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
 ):
     """Gather this program's tile values from the compact store."""
@@ -174,6 +179,10 @@ def _unpack_tile(
 
     if pack_sbit:
         return load_15bit_at_indices(vals_ptr, base + ranks, mask_bits == 1)
+    elif fp8:
+        # Promote to fp32 before dequantizing so downstream math stays in fp32.
+        q = tl.load(vals_ptr + base + ranks, mask=(mask_bits == 1), other=0.0)
+        return q.to(tl.float32) * tl.load(scale_ptr)
     else:
         return tl.load(vals_ptr + base + ranks, mask=(mask_bits == 1), other=0.0)
 
@@ -197,13 +206,14 @@ def _store_tile(
     tl.store(dense_ptr + offs, v_2d, mask=(offs_m < batch_rows) & (offs_k < K))
 
 
-@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows", "pack_sbit", "square_vals"])
+@triton.autotune(configs=_UNPACK_CONFIGS, key=["grid_n_sparse", "K", "batch_rows", "pack_sbit", "fp8", "square_vals"])
 @triton.jit
 def _unpack_batch_kernel(
     vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
     dense_ptr,
     first_m_tile, grid_n_sparse, K, batch_rows,
     square_vals: tl.constexpr, RELU2_SCALE: tl.constexpr, pack_sbit: tl.constexpr,
+    fp8: tl.constexpr, scale_ptr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
 ):
     """ Unpack stored tile values as-is into a dense ``[batch_rows, K]`` slice.
@@ -212,7 +222,7 @@ def _unpack_batch_kernel(
         """
     vals = _unpack_tile(vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
                             first_m_tile, grid_n_sparse,
-                            pack_sbit,
+                            pack_sbit, fp8, scale_ptr,
                             TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES)
 
     if square_vals:
@@ -266,12 +276,12 @@ def _relu_grad_sparse_kernel(
 #   Autotuned with restore_value=["grad_ptr"]: resets in-place grad between
 #   benchmark iterations so the non-idempotent transform never compounds.
 # ═══════════════════════════════════════════════════════════════════════════════
-@triton.autotune(configs=_MASK_CONFIGS, key=["M", "N", "pack_sbit"], restore_value=["grad_ptr"])
+@triton.autotune(configs=_MASK_CONFIGS, key=["M", "N", "pack_sbit", "fp8"], restore_value=["grad_ptr"])
 @triton.jit
 def _relu2_grad_sparse_kernel(
     grad_ptr, vals_ptr, bitmask_ptr, prefix_ptr, vals_offset_ptr,
     M, N,
-    pack_sbit: tl.constexpr,
+    pack_sbit: tl.constexpr, fp8: tl.constexpr, scale_ptr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     TILE_NUMEL: tl.constexpr, TILE_BYTES: tl.constexpr,
     RELU2_SCALE: tl.constexpr,
@@ -300,6 +310,8 @@ def _relu2_grad_sparse_kernel(
     active = mask_bits == 1
     if pack_sbit:
         r = load_15bit_at_indices(vals_ptr, base + ranks, active)
+    elif fp8:
+        r = tl.load(vals_ptr + base + ranks, mask=active, other=0.0).to(tl.float32) * tl.load(scale_ptr)
     else:
         r = tl.load(vals_ptr + base + ranks, mask=active, other=0.0)
 
