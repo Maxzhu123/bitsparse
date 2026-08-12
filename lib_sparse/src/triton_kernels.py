@@ -25,8 +25,11 @@ from .bitpacking import load_15bit_at_indices
 # Autotune configs for the hot kernels.
 # ═══════════════════════════════════════════════════════════════════════════════
 # Memory-bound gather kernels: configs are keyed on the dense output shape so
-# each distinct tile-grid / batch size benchmarks once.
+# each distinct tile-grid / batch size benchmarks once.  The 2-warp config
+# wins for the small per-program tiles.
 _UNPACK_CONFIGS = [
+    triton.Config({}, num_warps=2, num_stages=1),
+    triton.Config({}, num_warps=2, num_stages=2),
     triton.Config({}, num_warps=4, num_stages=1),
     triton.Config({}, num_warps=4, num_stages=2),
     triton.Config({}, num_warps=8, num_stages=2),
