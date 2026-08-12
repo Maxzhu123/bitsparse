@@ -53,7 +53,7 @@ def decompress(sparse: BitsparseTensor) -> Tensor:
 
 def validate_sparse(dense: Tensor, sparse: BitsparseTensor) -> None:
     restored = decompress(sparse)
-    if sparse.fp8:
+    if sparse.scale is not None:
         # Scaled FP8 rounds to the nearest e4m3 step, so compare within the
         # quantization error instead of demanding exact equality.
         torch.testing.assert_close(

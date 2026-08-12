@@ -24,8 +24,8 @@ class _PreparedTiles(NamedTuple):
 
 def _prepare_tiles(dense: Tensor) -> _PreparedTiles:
     """Create tile masks and enqueue the logical nonzero prefix sum."""
-    if dense.dtype != torch.bfloat16:
-        raise TypeError("BitsparseTensor supports bfloat16 values")
+    if dense.dtype not in (torch.bfloat16, _FP8_DTYPE):
+        raise TypeError("BitsparseTensor supports bfloat16 and float8_e4m3fn values")
     M, N = dense.shape
     grid_m, grid_n, num_tiles, TILE_NUMEL, TILE_BYTES = tile_grid(M, N, BLOCK_M, BLOCK_N)
 
@@ -62,19 +62,26 @@ def dense_to_tilesparse(
 ) -> BitsparseTensor:
     """Convert dense tensor into a BitsparseTensor.
 
-    BF16 values are compacted into the requested ``storage_dtype``.  FP8
-    storage quantizes with a per-tensor scale, so the scale becomes part of the
-    sparse metadata; reconstructed tensors stay in the input's BF16 dtype.
+    FP8 values are compacted as-is; BF16 values are quantized to FP8 storage
+    with a per-tensor scale that becomes part of the sparse metadata.  Only the
+    bf16-to-fp8 path needs a scale, so fp8 inputs skip it entirely.
+    Reconstructed tensors stay in the input's dtype.
     """
     if storage_dtype is None:
-        storage_dtype = sparse_data.dtype if sparse_data is not None else torch.bfloat16
+        storage_dtype = (
+            sparse_data.dtype if sparse_data is not None else dense.dtype
+        )
     if pack_sbit and storage_dtype != torch.bfloat16:
         raise ValueError(
             "pack_sbit uses the BF16-specific 15-bit codec and cannot be "
             f"combined with storage dtype {storage_dtype}"
         )
 
-    scale = _compute_scale(dense) if storage_dtype == _FP8_DTYPE else None
+    scale = (
+        _compute_scale(dense)
+        if storage_dtype == _FP8_DTYPE and dense.dtype != _FP8_DTYPE
+        else None
+    )
     prepared = _prepare_tiles(dense)
     M, N = prepared.M, prepared.N
     grid_m, grid_n = prepared.grid_m, prepared.grid_n

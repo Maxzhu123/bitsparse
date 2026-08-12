@@ -43,8 +43,9 @@ def compact_vals(
 ) -> tuple[Tensor, Tensor]:
     """ Compact positive values into standalone or preallocated storage.
         Supports 15-bit packing, FP8 quantization, and preallocated vals buffer. """
-    if storage_dtype == torch.float8_e4m3fn:
-        # Pre-quantize outside the kernel; the compaction kernel is dtype-agnostic.
+    if storage_dtype == torch.float8_e4m3fn and dense.dtype != torch.float8_e4m3fn:
+        # Quantize BF16 inputs outside the kernel; the kernel is dtype-agnostic.
+        # FP8 inputs are already FP8 and skip the scale.
         dense = (dense.detach() / scale).to(torch.float8_e4m3fn)
     staging_numel = dense.numel()
     standalone = vals is None
@@ -129,7 +130,7 @@ def unpack_batch_(
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
     )
-    if sparse.fp8:
+    if sparse.scale is not None:
         output.mul_(sparse.scale)
     return output
 
@@ -153,7 +154,7 @@ def unpack_relu2_batch_(
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
     )
-    if sparse.fp8:
+    if sparse.scale is not None:
         output.mul_(sparse.scale.square())
     return output
 
@@ -193,6 +194,6 @@ def relu2_grad_sparse_(grad: Tensor, sparse_z: BitsparseTensor) -> Tensor:
         TILE_BYTES=BLOCK_M * BLOCK_N // 8,
         RELU2_SCALE=RELU2_SCALE,
     )
-    if sparse_z.fp8:
+    if sparse_z.scale is not None:
         grad.mul_(sparse_z.scale)
     return grad
