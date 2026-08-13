@@ -16,45 +16,21 @@ def _tensor_scale(x: Tensor) -> Tensor:
     return torch.where(scale == 0, torch.ones_like(scale), scale)
 
 
-class MatmulFP8(Function):
-    """``a @ b`` computed with e4m3fn operands and BF16 output.
-
-    Both operands are quantized with a tensor-wise scale and multiplied with
-    ``torch._scaled_mm`` (fp32 accumulation).  Falls back to a BF16 matmul when
-    the contraction dims are not multiples of 16.  The backward pass is the
-    straight-through estimator: gradients are computed as if the matmul were
-    plain BF16.
-    """
-
-    @staticmethod
-    def forward(ctx, a: Tensor, b: Tensor) -> Tensor:
-        if a.shape[1] % 16 == 0 and b.shape[1] % 16 == 0:
-            try:
-                a_scale = _tensor_scale(a)
-                b_scale = _tensor_scale(b)
-                a_fp8 = (a / a_scale).to(_FP8_DTYPE).contiguous()
-                b_fp8 = (b / b_scale).to(_FP8_DTYPE).contiguous()
-                out = torch._scaled_mm(
-                    a_fp8, b_fp8,
-                    scale_a=a_scale, scale_b=b_scale, out_dtype=torch.bfloat16,
-                )
-            except Exception:
-                # Unsupported shapes/heuristics in _scaled_mm: fall back to bf16.
-                out = a @ b
-        else:
-            out = a @ b
-        ctx.save_for_backward(a, b)
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_output: Tensor):
-        a, b = ctx.saved_tensors
-        return grad_output @ b.t(), a.t() @ grad_output
-
-
 def matmul_fp8(a: Tensor, b: Tensor) -> Tensor:
     """``a @ b`` in FP8 (e4m3fn) with tensor-wise scaling, output BF16."""
-    return MatmulFP8.apply(a, b)
+    try:
+        a_scale = _tensor_scale(a)
+        b_scale = _tensor_scale(b)
+        a_fp8 = (a / a_scale).to(_FP8_DTYPE).contiguous()
+        b_fp8 = (b / b_scale).to(_FP8_DTYPE).contiguous()
+        out = torch._scaled_mm(
+            a_fp8, b_fp8,
+            scale_a=a_scale, scale_b=b_scale, out_dtype=torch.bfloat16,
+        )
+    except Exception:
+        # Unsupported shapes/heuristics in _scaled_mm: fall back to bf16.
+        raise ValueError(
+            f"Shape of matrices must be a multiple of 16 due to current limitations. {a.shape[1]=}, {b.shape[1]=}")
 
 
 def _matmul(a: Tensor, b: Tensor, fp8: bool) -> Tensor:
