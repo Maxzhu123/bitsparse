@@ -56,7 +56,7 @@ def validate_sparse(dense: Tensor, sparse: BitsparseTensor) -> None:
     if sparse.scale is not None:
         # Scaled FP8 rounds to the nearest representable step, so compare within
         # the quantization error (eps is 0.125 for e4m3fn, 0.25 for e5m2).
-        eps = torch.finfo(sparse.storage_dtype).eps
+        eps = torch.finfo(sparse.input_dtype).eps
         torch.testing.assert_close(
             restored,
             dense,

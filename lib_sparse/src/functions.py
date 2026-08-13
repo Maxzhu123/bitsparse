@@ -7,6 +7,9 @@ from .triton_operators import compact_vals, tile_pack
 from ..bitsparse import BitsparseTensor, TensorBuffer, is_fp8, tile_grid
 from ..config import BLOCK_M, BLOCK_N
 
+_FP8_DTYPE = torch.float8_e4m3fn
+_FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
+
 
 class _PreparedTiles(NamedTuple):
     M: int
@@ -46,16 +49,15 @@ def _prepare_tiles(dense: Tensor) -> _PreparedTiles:
 
 def _compute_scale(dense: Tensor, storage_dtype: torch.dtype) -> Tensor:
     """Per-tensor FP8 scale mapping ``max|X|`` to the largest stored value."""
-    amax = dense.detach().abs().amax()
+    amax = dense.detach().abs().amax().float()
     scale = amax / torch.finfo(storage_dtype).max
     return torch.where(scale == 0, torch.ones_like(scale), scale)
 
 
 def dense_to_tilesparse(
-    dense: Tensor,
+    dense: Tensor, scale: Tensor|None,
     sparse_data: TensorBuffer | None = None,
     pack_sbit: bool = False,
-    storage_dtype: torch.dtype | None = None,
 ) -> BitsparseTensor:
     """Convert dense tensor into a BitsparseTensor.
 
@@ -64,16 +66,6 @@ def dense_to_tilesparse(
     bf16-to-fp8 path needs a scale, so fp8 inputs skip it entirely.
     Reconstructed tensors stay in the input's dtype.
     """
-    if storage_dtype is None:
-        storage_dtype = (
-            sparse_data.dtype if sparse_data is not None else dense.dtype
-        )
-
-    scale = (
-        _compute_scale(dense, storage_dtype)
-        if is_fp8(storage_dtype) and dense.dtype != storage_dtype
-        else None
-    )
     prepared = _prepare_tiles(dense)
     M, N = prepared.M, prepared.N
     grid_m, grid_n = prepared.grid_m, prepared.grid_n
@@ -95,7 +87,7 @@ def dense_to_tilesparse(
     vals, vals_offset = compact_vals(
         dense, tile_bitmasks, tile_prefix, vals, vals_offset,
         M, N, grid_n, num_tiles, BLOCK_M, BLOCK_N, TILE_NUMEL,
-        pack_sbit, storage_dtype, scale,
+        pack_sbit,
     )
 
     if sparse_data is not None:
@@ -105,5 +97,13 @@ def dense_to_tilesparse(
         vals, tile_bitmasks, tile_prefix,
         grid_m, grid_n, BLOCK_M, BLOCK_N, dense.shape,
         dense.dtype, scale,
-        vals_offset=vals_offset, pack_sbit=pack_sbit, storage_dtype=storage_dtype,
+        vals_offset=vals_offset, pack_sbit=pack_sbit,
     )
+
+
+def to_fp8(x: Tensor) -> tuple[Tensor, Tensor]:
+    scale = (x.detach().abs().max() / _FP8_MAX).to(torch.float32)
+    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+    x_fp8 = (x / scale).to(_FP8_DTYPE).contiguous()
+    return x_fp8, scale
+

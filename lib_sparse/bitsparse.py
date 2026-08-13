@@ -50,7 +50,7 @@ class BitsparseTensor:
 
     def __init__(self, vals, bitmask, prefix,
                  grid_m, grid_n, BLOCK_M, BLOCK_N, shape, input_dtype,
-                 scale=None, vals_offset=None, pack_sbit=False, storage_dtype=None):
+                 scale=None, vals_offset=None, pack_sbit=False):
         """Store compressed values and tile metadata for later unpack/masking."""
         self.vals = vals
         self.bitmask = bitmask
@@ -62,7 +62,7 @@ class BitsparseTensor:
         self.input_dtype = input_dtype
         # Logical dtype of the stored values; for pack_sbit ``vals`` is a raw
         # uint8 bitstream, so the logical dtype must be carried separately.
-        self.storage_dtype = vals.dtype if storage_dtype is None else storage_dtype
+        # self.input_dtype = vals.dtype if storage_dtype is None else storage_dtype
         self.scale = scale
         self.grid_m = grid_m
         self.grid_n = grid_n
@@ -73,7 +73,7 @@ class BitsparseTensor:
     @property
     def fp8(self) -> bool:
         """True when values are stored as FP8 (e4m3fn or e5m2) instead of BF16."""
-        return is_fp8(self.storage_dtype)
+        return is_fp8(self.input_dtype)
 
     def __repr__(self):
         return (f"BitsparseTensor(shape={list(self.shape)}, "
@@ -88,7 +88,7 @@ class BitsparseTensor:
     def vram_size(self):
         nnz = int(self.prefix[-1].item())
         if self.pack_sbit:
-            val_size = packed_nbytes(nnz, bits_per_value(self.storage_dtype))
+            val_size = packed_nbytes(nnz, bits_per_value(self.input_dtype))
         else:
             val_size = nnz * self.vals.element_size()
         bitmask_size = self.bitmask.element_size() * self.bitmask.nelement()

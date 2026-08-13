@@ -38,15 +38,12 @@ def compact_vals(
     vals: Tensor | None, vals_offset: Tensor | None,
     M: int, N: int, grid_n: int, num_tiles: int,
     BLOCK_M: int, BLOCK_N: int, TILE_NUMEL: int, pack_sbit: bool,
-    storage_dtype: torch.dtype = torch.bfloat16,
-    scale: Tensor | None = None,
+    # storage_dtype: torch.dtype = torch.bfloat16,
+    # scale: Tensor | None = None,
 ) -> tuple[Tensor, Tensor]:
     """ Compact positive values into standalone or preallocated storage.
         Supports bit packing, FP8 quantization, and preallocated vals buffer. """
-    if is_fp8(storage_dtype) and dense.dtype != storage_dtype:
-        # Quantize BF16 inputs outside the kernel; the kernel is dtype-agnostic.
-        # FP8 inputs are already FP8 and skip the scale.
-        dense = (dense.detach() / scale).to(storage_dtype)
+    storage_dtype = dense.dtype
     staging_numel = dense.numel()
     standalone = vals is None
     if standalone:
@@ -133,12 +130,12 @@ def unpack_batch_(
         vals, sparse.bitmask, sparse.prefix, sparse.vals_offset,
         output,
         first_m_tile, grid_n, K, batch_rows,
-        False, 0, sparse.pack_sbit, sparse.fp8, pack_codec(sparse.storage_dtype),
+        False, 0, sparse.pack_sbit, sparse.fp8, pack_codec(sparse.input_dtype),
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
     )
-    if sparse.scale is not None:
-        output.mul_(sparse.scale)
+    # if sparse.scale is not None:
+    #     output.mul_(sparse.scale)
     return output
 
 
@@ -157,7 +154,7 @@ def unpack_relu2_batch_(
         vals, sparse.bitmask, sparse.prefix, sparse.vals_offset,
         output,
         first_m_tile, grid_n, K, batch_rows,
-        True, RELU2_SCALE, sparse.pack_sbit, sparse.fp8, pack_codec(sparse.storage_dtype),
+        True, RELU2_SCALE, sparse.pack_sbit, sparse.fp8, pack_codec(sparse.input_dtype),
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
     )
@@ -195,7 +192,7 @@ def relu2_grad_sparse_(grad: Tensor, sparse_z: BitsparseTensor) -> Tensor:
     _relu2_grad_sparse_kernel[(sparse_z.grid_m, sparse_z.grid_n)](
         grad, vals, sparse_z.bitmask, sparse_z.prefix, sparse_z.vals_offset,
         sparse_z.shape[0], sparse_z.shape[1],
-        sparse_z.pack_sbit, sparse_z.fp8, pack_codec(sparse_z.storage_dtype),
+        sparse_z.pack_sbit, sparse_z.fp8, pack_codec(sparse_z.input_dtype),
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N,
         TILE_BYTES=BLOCK_M * BLOCK_N // 8,

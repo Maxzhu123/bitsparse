@@ -23,7 +23,7 @@ class FFNReluModel(FFNReluABC):
             x_inner = F.rms_norm(x, x.shape[1:])
             if i < self.sp_blocks:
                 x = x + FFNRelu.apply(x_inner, W1, W2, sparse_data=buffer, pack_sbit=pack_sbit,
-                                      storage_dtype=storage_dtype)
+                                      dtype=storage_dtype)
                 # x = x + FFNSparse.apply(x_inner, W1, W2, buffer)
             else:
                 x = x + FFN.apply(x_inner, W1, W2)
@@ -55,8 +55,9 @@ if __name__ == "__main__":
     from experiments.experiment import run_batch, run_layers
 
     for _ in range(1):
-        run_batch(FFNReluModel, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[5_000], save_name="./results/test_relu.csv")
-        run_batch(FFNRelu2Model, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[5_000], save_name="./results/test_relu2.csv")
+        run_batch(FFNReluModel, sp_blocks=10, warmup_steps=1, eval_steps=1, batch_sizes=[5_008], save_name="./results/test_relu.csv")
+        # run_batch(FFNRelu2Model, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[5_000], save_name="./results/test_relu2.csv")
 
     # run_layers(FFNReluModel, bs=16_000, save_name="relu2_sparser_layers.csv")
     # evaluate(FFMReluModel, bs=16_000, sp_blocks=0)
+

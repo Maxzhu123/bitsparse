@@ -18,7 +18,7 @@ DIM = 4096
 
 # Datatype flag: torch.bfloat16 or torch.float8_e4m3fn.  FP8 quantizes the
 # forward matmuls (fp8 + fp8 -> bf16) and stores saved activations in FP8.
-DTYPE = torch.bfloat16
+DTYPE = torch.float8_e4m3fn
 
 # Correctness tolerance: exact for bf16, loose for the fp8 quantization error.
 CHECK_RTOL = CHECK_ATOL = 3e-6 if DTYPE == torch.bfloat16 else 1e-1
@@ -130,7 +130,7 @@ def evaluate(model_fn, bs, warmup_steps=1, eval_steps=5, layers=LAYERS, sp_block
 
     # 0) Run baseline model
     run_step(x, model, sparse=False, steps=warmup_steps)
-    _, vram_base, avg_time_base = run_step(x, model, sparse=False, steps=eval_steps)
+    tracking_dn, vram_base, avg_time_base = run_step(x, model, sparse=False, steps=eval_steps)
     print(f"Baseline: {vram_base = :.0f} MB, avg_time = {avg_time_base:.2f} ms")
 
     # 1) Run checkpointed
