@@ -11,6 +11,7 @@ import os
 from experiments.utils import setup_hooks
 from lib_sparse.bitsparse import TensorBuffer, bits_per_value
 from lib_sparse.config import RELU2_SCALE
+from lib_sparse.fp8 import is_fp8, matmul
 
 LAYERS = 4
 BATCH_SIZE = 10000
@@ -286,14 +287,17 @@ class FFN(Function):
     """Dense baseline autograd FFN for comparison.
 
     For ``x[B, D]``, ``W1[H, D]``, and ``W2[D, H]`` computes
-    ``z = relu(x @ W1.T)`` and ``output = z @ W2.T``.
+    ``z = relu(x @ W1.T)`` and ``output = z @ W2.T``.  The forward matmuls
+    are quantized to FP8 (fp8 + fp8 -> bf16) while activations stay in BF16,
+    matching the ``lib_sparse.layers`` FFN.
     """
     @staticmethod
     def forward(ctx, x, W1, W2, e1=None):
         """Run the dense FFN forward pass and save tensors for backward."""
-        z = x @ W1.T
+        fp8 = is_fp8(DTYPE)
+        z = matmul(x, W1.T, fp8)
         z.relu_()
-        output = z @ W2.T
+        output = matmul(z, W2.T, fp8)
         ctx.save_for_backward(x, W1, W2, z)
         return output
 
@@ -302,9 +306,10 @@ class FFN(Function):
         """Compute dense FFN gradients from ``grad_output[B, D]``."""
         x, W1, W2, z = ctx.saved_tensors
         needs_x = ctx.needs_input_grad[0]
+        fp8 = is_fp8(DTYPE)
 
-        grad_z = grad_output @ W2
-        grad_W2 = grad_output.T @ z
+        grad_z = matmul(grad_output, W2, fp8)
+        grad_W2 = matmul(grad_output.T, z, fp8)
 
         grad_preact = torch.ops.aten.threshold_backward.grad_input(
             grad_z, z, 0, grad_input=grad_z
@@ -315,9 +320,9 @@ class FFN(Function):
 
         grad_x = None
         if needs_x:
-            grad_x = grad_preact @ W1
+            grad_x = matmul(grad_preact, W1, fp8)
 
-        grad_W1 = grad_preact.T @ x
+        grad_W1 = matmul(grad_preact.T, x, fp8)
         return grad_x, grad_W1, grad_W2, None, None
 
     @staticmethod
@@ -327,9 +332,10 @@ class FFN(Function):
     @staticmethod
     def forward_ckpt(x, W1, W2):
         """Run the dense FFN forward pass and save tensors for backward."""
-        z = x @ W1.T
+        fp8 = is_fp8(DTYPE)
+        z = matmul(x, W1.T, fp8)
         z.relu_()
-        output = z @ W2.T
+        output = matmul(z, W2.T, fp8)
         return output
 
 
