@@ -11,14 +11,14 @@ import os
 from experiments.utils import setup_hooks
 from lib_sparse.bitsparse import TensorBuffer, bits_per_value
 from lib_sparse.config import RELU2_SCALE
-from lib_sparse.fp8 import is_fp8, matmul
+from lib_sparse.fp8 import is_fp8, matmul, to_fp8
 
 LAYERS = 6
 BATCH_SIZE = 10000
 DIM = 4096
 
 # Datatype for matmul + activation caching: torch.bfloat16 or torch.float8_e4m3fn.
-DTYPE = torch.bfloat16 # torch.float8_e4m3fn #
+DTYPE = torch.float8_e4m3fn # torch.bfloat16 #
 
 # Correctness tolerance: exact for bf16, loose for the fp8 quantization error.
 CHECK_RTOL = CHECK_ATOL = 3e-6 if DTYPE == torch.bfloat16 else 1e-1
@@ -262,20 +262,32 @@ class FFNRelu2_2(Function):
         needs_x = ctx.needs_input_grad[0]
         fp8 = is_fp8(DTYPE)
 
+        # Use fp8 grad_output
+        if fp8:
+            grad_output, scale = to_fp8(grad_output)
+        else:
+            grad_output, scale = grad_output, None
+
         z = r.square().mul_(RELU2_SCALE)
-        grad_W2 = matmul(grad_output.T, z, fp8)
+        grad_W2 = matmul(grad_output.T, z, fp8, a_scale=scale)
         del z
-        grad_z = matmul(grad_output, W2, fp8)
+        grad_z = matmul(grad_output, W2, fp8, a_scale=scale)
         grad_preact = grad_z * (2.0 * RELU2_SCALE * r)
         del grad_z, r
-        grad_W1 = matmul(grad_preact.T, x, fp8)
 
         if not torch.compiler.is_compiling():
             ctx.maybe_clear_saved_tensors()
 
+        # Use fp8 grad_preact
+        if fp8:
+            grad_preact, scale = to_fp8(grad_preact)
+        else:
+            grad_preact, scale = grad_preact, None
+
         grad_x = None
         if needs_x:
-            grad_x = matmul(grad_preact, W1, fp8)
+            grad_x = matmul(grad_preact, W1, fp8, a_scale=scale)
+        grad_W1 = matmul(grad_preact.T, x, fp8, a_scale=scale)
         return grad_x, grad_W1, grad_W2
 
     @staticmethod
@@ -318,8 +330,14 @@ class FFN(Function):
         needs_x = ctx.needs_input_grad[0]
         fp8 = is_fp8(DTYPE)
 
-        grad_z = matmul(grad_output, W2, fp8)
-        grad_W2 = matmul(grad_output.T, z, fp8)
+        # Use fp8 grad_output
+        if fp8:
+            grad_output, scale = to_fp8(grad_output)
+        else:
+            grad_output, scale = grad_output, None
+
+        grad_z = matmul(grad_output, W2, fp8, a_scale=scale)
+        grad_W2 = matmul(grad_output.T, z, fp8, a_scale=scale)
 
         grad_preact = torch.ops.aten.threshold_backward.grad_input(
             grad_z, z, 0, grad_input=grad_z
@@ -328,11 +346,17 @@ class FFN(Function):
         if not torch.compiler.is_compiling():
             ctx.maybe_clear_saved_tensors()
 
-        grad_x = None
+        # Use fp8 grad_preact
+        if fp8:
+            grad_preact, scale = to_fp8(grad_preact)
+        else:
+            grad_preact, scale = grad_preact, None
+            
         if needs_x:
-            grad_x = matmul(grad_preact, W1, fp8)
-
-        grad_W1 = matmul(grad_preact.T, x, fp8)
+            grad_x = matmul(grad_preact, W1, fp8, a_scale=scale)
+        else:
+            grad_x = None
+        grad_W1 = matmul(grad_preact.T, x, fp8, a_scale=scale)
         return grad_x, grad_W1, grad_W2, None, None
 
     @staticmethod

@@ -51,16 +51,15 @@ class ReluLinear(Function):
 
         fp8 = is_fp8(ctx.dtype)
         if fp8:
-            grad_output_fp8, scale = to_fp8(grad_output)
-            del grad_output
+            grad_output, scale = to_fp8(grad_output)
         else:
-            grad_output_fp8, scale = grad_output, None
+            grad_output, scale = grad_output, None
 
-        grad_W2 = AspB(grad_output_fp8.T, h, A_scale=scale)
+        grad_W2 = AspB(grad_output.T, h, A_scale=scale)
 
         # Gradients for input
         if needs_z:
-            grad_h = matmul(grad_output_fp8, W, fp8=fp8, a_scale=scale)
+            grad_h = matmul(grad_output, W, fp8=fp8, a_scale=scale)
             grad_z = mask_with_bitmask_(grad_h, h)
         else:
             grad_z = None
@@ -143,18 +142,18 @@ class Relu2Linear(Function):
         h: BitsparseTensor = ctx.h_sparse
         ctx.h_sparse = None
 
+        # Use fp8 grad_output
         fp8 = is_fp8(ctx.dtype)
         if fp8:
-            grad_output_fp8, scale = to_fp8(grad_output)
-            del grad_output
+            grad_output, scale = to_fp8(grad_output)
         else:
-            grad_output_fp8, scale = grad_output, None
+            grad_output, scale = grad_output, None
 
-        grad_W2 = AspRelu2B(grad_output_fp8.T, h, A_scale=scale)
+        grad_W2 = AspRelu2B(grad_output.T, h, A_scale=scale)
 
         # Needs gradient for z
         if needs_z:
-            grad_h = matmul(grad_output_fp8, W, fp8=fp8, a_scale=scale)
+            grad_h = matmul(grad_output, W, fp8=fp8, a_scale=scale)
             grad_z = relu2_grad_sparse_(grad_h, h)
         else:
             grad_z = None
