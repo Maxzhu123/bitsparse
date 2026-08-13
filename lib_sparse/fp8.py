@@ -40,7 +40,7 @@ class MatmulFp8(Function):
             ctx.save_for_backward(a_fp8, b_fp8, a_scale, b_scale)
 
         out = F.scaled_mm(
-            mat_a=a_fp8, mat_b=b_fp8,
+            mat_a=a_fp8.contiguous(), mat_b=b_fp8,
             scale_a=a_scale, scale_b=b_scale, output_dtype=torch.bfloat16,
             scale_recipe_a=F.ScalingType.TensorWise, scale_recipe_b=F.ScalingType.TensorWise
         )
@@ -94,5 +94,5 @@ def matmul(a: Tensor, b: Tensor, fp8: bool, a_scale:Tensor|None=None, b_scale:Te
 def to_fp8(x: Tensor) -> tuple[Tensor, Tensor]:
     scale = (x.detach().abs().max() / _FP8_MAX).to(torch.float32)
     scale = scale.clamp(min=1e-9)
-    x_fp8 = (x / scale).to(_FP8_DTYPE).contiguous()
+    x_fp8 = (x / scale).to(_FP8_DTYPE)
     return x_fp8, scale

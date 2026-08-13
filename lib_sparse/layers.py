@@ -14,15 +14,6 @@ if TYPE_CHECKING:
     from bitsparse import TensorBuffer
 
 
-def print_memory(msg, max=True):
-    from cprint import c_print
-    if max:
-        memory = torch.cuda.max_memory_allocated("cuda") / 1024 ** 2
-    else:
-        memory = torch.cuda.memory_allocated("cuda") / 1024 ** 2
-    c_print(f'{msg}: {memory:.2f} MB', color="bright_cyan")
-
-
 # ------------------------------------------------------------
 # ReLU layers
 # ------------------------------------------------------------
@@ -65,7 +56,7 @@ class ReluLinear(Function):
         else:
             grad_output_fp8, scale = grad_output, None
 
-        grad_W2 = AspB(grad_output_fp8.T.contiguous(), h, A_scale=scale)
+        grad_W2 = AspB(grad_output_fp8.T, h, A_scale=scale)
 
         # Gradients for input
         if needs_z:
@@ -159,7 +150,7 @@ class Relu2Linear(Function):
         else:
             grad_output_fp8, scale = grad_output, None
 
-        grad_W2 = AspRelu2B(grad_output_fp8.T.contiguous(), h, A_scale=scale)
+        grad_W2 = AspRelu2B(grad_output_fp8.T, h, A_scale=scale)
 
         # Needs gradient for z
         if needs_z:
@@ -206,90 +197,3 @@ class FFNRelu2_3:
         y2 = Relu2Linear.apply(y1, W3, sparse_data, pack_sbit, storage_dtype)
         return y2
 
-# # ------------------------------------------------------------
-# # Manual implemented layers
-# # ------------------------------------------------------------
-# class FFNSparse(Function):
-#     """Forward of FFN."""
-#
-#     @staticmethod
-#     def forward(ctx, x, W1, W2, sparse_data:TensorBuffer|None=None, pack_sbit: bool=False,
-#                 storage_dtype: torch.dtype = torch.bfloat16):
-#         ctx.save_for_backward(x, W1, W2)
-#         z = matmul(x, W1.T, is_fp8(storage_dtype))
-#         h = z.relu_()
-#         ctx.h_sparse = dense_to_tilesparse(h, sparse_data, pack_sbit, storage_dtype)
-#         return matmul(h, W2.T, is_fp8(storage_dtype))
-#
-#     @staticmethod
-#     def backward(ctx, grad_output: Tensor):
-#         """Compute FFN gradients."""
-#         x, W1, W2 = ctx.saved_tensors
-#         h: BitsparseTensor = ctx.h_sparse
-#         ctx.h_sparse = None
-#         needs_x = ctx.needs_input_grad[0]
-#
-#         grad_W2 = AspB(grad_output.T, h)
-#
-#         grad_h = grad_output @ W2
-#         grad_z = mask_with_bitmask_(grad_h, h)
-#         del h
-#
-#         if needs_x:
-#             grad_x = grad_z @ W1
-#         else:
-#             grad_x = None
-#
-#         grad_W1 = grad_z.T @ x
-#         return grad_x, grad_W1, grad_W2, None, None, None
-#
-#
-# class FFNSparseRelu2(Function):
-#     """Autograd FFN using sparse storage for ReLU-squared hidden activation.
-#     Formula:
-#         z = x @ W1.T
-#         h = k * relu(z^2)
-#         out = z @ W2.T
-#         k = 1 / sqrt(3) matches the RMS of ReLU for standard-normal inputs.
-#     """
-#     @staticmethod
-#     def forward(ctx, x, W1, W2, sparse_data: TensorBuffer|None=None, pack_sbit: bool=False,
-#                 storage_dtype: torch.dtype = torch.bfloat16):
-#         bs_dims = x.shape[:-1]          # [*bs, d]
-#         x = x.reshape(-1, x.shape[-1])
-#
-#         ctx.save_for_backward(x, W1, W2)
-#         z = _mm(x, W1.T, storage_dtype)
-#         h = z.relu_()
-#         ctx.h_sparse = dense_to_tilesparse(h, sparse_data, pack_sbit, storage_dtype)
-#         h.square_()
-#         h.mul_(RELU2_SCALE)
-#         out = _mm(h, W2.T, storage_dtype)
-#         out = out.reshape(*bs_dims, -1)
-#         return out
-#
-#     @staticmethod
-#     def backward(ctx, grad_output: Tensor):
-#         """Backward for ``y = relu(x @ W1.T)^2 @ W2.T`` using sparse saved ``z``.
-#             grad_output.shape = [*bs, in_dim]
-#         """
-#         bs_dims = grad_output.shape[:-1]  # [*bs, in_dim]
-#         grad_output = grad_output.reshape(-1, grad_output.shape[-1])
-#         x, W1, W2 = ctx.saved_tensors
-#         h = ctx.h_sparse
-#         ctx.h_sparse = None
-#         needs_x = ctx.needs_input_grad[0]
-#
-#         grad_W2 = AspRelu2B(grad_output.T, h)
-#
-#         grad_h2 = grad_output @ W2
-#         grad_z = relu2_grad_sparse_(grad_h2, h)
-#         del h
-#
-#         if needs_x:
-#             grad_x = grad_z @ W1
-#             grad_x = grad_x.reshape(*bs_dims, -1)
-#         else:
-#             grad_x = None
-#         grad_W1 = grad_z.T @ x
-#         return grad_x, grad_W1, grad_W2, None, None, None

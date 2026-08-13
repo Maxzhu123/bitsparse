@@ -13,12 +13,12 @@ from lib_sparse.bitsparse import TensorBuffer, bits_per_value
 from lib_sparse.config import RELU2_SCALE
 from lib_sparse.fp8 import is_fp8, matmul
 
-LAYERS = 4
+LAYERS = 6
 BATCH_SIZE = 10000
 DIM = 4096
 
 # Datatype for matmul + activation caching: torch.bfloat16 or torch.float8_e4m3fn.
-DTYPE = torch.float8_e4m3fn # torch.bfloat16
+DTYPE = torch.bfloat16 # torch.float8_e4m3fn #
 
 # Correctness tolerance: exact for bf16, loose for the fp8 quantization error.
 CHECK_RTOL = CHECK_ATOL = 3e-6 if DTYPE == torch.bfloat16 else 1e-1

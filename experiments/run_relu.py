@@ -30,7 +30,6 @@ class FFNReluModel(FFNReluABC):
         return x
 
 
-
 class FFNRelu2Model(FFNRelu2ABC):
     def __init__(self, layers, sp_blocks, dim, dtype):
         super().__init__(dtype, layers, sp_blocks, dim)
@@ -55,7 +54,7 @@ if __name__ == "__main__":
     from experiments.experiment import run_batch, run_layers
 
     for _ in range(1):
-        run_batch(FFNRelu2Model, sp_blocks=10, warmup_steps=1, eval_steps=1, batch_sizes=[5_008], save_name="./results/test_relu.csv")
+        run_batch(FFNReluModel, sp_blocks=10, warmup_steps=1, eval_steps=1, batch_sizes=[8_000], save_name="./results/test_relu.csv")
         # run_batch(FFNRelu2Model, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[5_000], save_name="./results/test_relu2.csv")
 
     # run_layers(FFNReluModel, bs=16_000, save_name="relu2_sparser_layers.csv")
