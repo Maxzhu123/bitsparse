@@ -10,11 +10,18 @@ import os
 
 from config import RELU2_SCALE
 from experiments.utils import setup_hooks
-from lib_sparse.bitsparse import TensorBuffer
+from lib_sparse.bitsparse import TensorBuffer, bits_per_value
 
 LAYERS = 8
 BATCH_SIZE = 10000
 DIM = 4096
+
+# Datatype flag: torch.bfloat16 or torch.float8_e4m3fn.  FP8 quantizes the
+# forward matmuls (fp8 + fp8 -> bf16) and stores saved activations in FP8.
+DTYPE = getattr(torch, os.environ.get("DTYPE", "bfloat16"))
+
+# Correctness tolerance: exact for bf16, loose for the fp8 quantization error.
+CHECK_RTOL = CHECK_ATOL = 3e-6 if DTYPE == torch.bfloat16 else 1e-1
 
 BASIC_MODE = True
 DATA_SPARSITY = "Sparse"        # "Normal", "Sparse", "ReLU"
@@ -22,7 +29,8 @@ c_print(f'{DATA_SPARSITY = }', color="green")
 # ------------------------------------------------------------------------------
 # Evaluation Loop
 # ------------------------------------------------------------------------------
-def run_step(x, model, buffer=None, sparse=False, pack_sbit=False, steps=1):
+def run_step(x, model, buffer=None, sparse=False, pack_sbit=False,
+             storage_dtype=torch.bfloat16, steps=1):
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
@@ -35,7 +43,7 @@ def run_step(x, model, buffer=None, sparse=False, pack_sbit=False, steps=1):
         model.zero_grad()
         torch.cuda.reset_peak_memory_stats("cuda")
         if sparse:
-            y = model.forward(x, pack_sbit, buffer)
+            y = model.forward(x, pack_sbit, buffer, storage_dtype)
         else:
             y = model.forward_base(x)
         loss = (y - x).abs().mean()
@@ -111,6 +119,7 @@ def evaluate(model_fn, bs, warmup_steps=1, eval_steps=5, layers=LAYERS, sp_block
     """Build the benchmark model, run warmup and timed steps, and print memory results."""
     # Setup parameters
     dtype = torch.bfloat16
+    storage_dtype = DTYPE
     G = torch.Generator(device="cuda").manual_seed(0)
     x = torch.randn(bs, DIM, dtype=dtype, device="cuda", generator=G, requires_grad=True)
 
@@ -136,43 +145,44 @@ def evaluate(model_fn, bs, warmup_steps=1, eval_steps=5, layers=LAYERS, sp_block
         hdim_expanded = math.floor(DIM * 5.25)
         buffer_scale = 0.55
         value_capacity = int(bs * hdim_expanded * layers * buffer_scale)
-        bits_per_value = 16
-        buffer_size = (value_capacity * bits_per_value + 7) // 8
+        buffer_size = value_capacity * torch.empty((), dtype=storage_dtype).element_size()
         buffer = TensorBuffer(
-            buffer_size, dtype=dtype, device="cuda", pack_sbit=False
+            buffer_size, dtype=storage_dtype, device="cuda", pack_sbit=False
         )
 
-    run_step(x, model, buffer, sparse=True, steps=warmup_steps)
-    tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, pack_sbit=False, steps=eval_steps)
+    run_step(x, model, buffer, sparse=True, storage_dtype=storage_dtype, steps=warmup_steps)
+    tracking, vram, avg_time = run_step(x, model, buffer, sparse=True, pack_sbit=False,
+                                        storage_dtype=storage_dtype, steps=eval_steps)
     print(f"Compressed: {vram = :.0f} MB, avg_time = {avg_time:.2f} ms")
     # Check correctness
-    if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
+    if not torch.allclose(tracking, tracking_dn, atol=CHECK_ATOL, rtol=CHECK_RTOL):
         print("Predicted values are different.")
         print(f"{tracking_dn = }")
         print(f"{tracking = }")
-        torch.testing.assert_close(tracking, tracking_dn, atol=3e-6, rtol=3e-6)
+        torch.testing.assert_close(tracking, tracking_dn, atol=CHECK_ATOL, rtol=CHECK_RTOL)
 
-    # 3) Run with 15bit storage
+    # 3) Run with bit-packed storage
     buffer = None
     if not BASIC_MODE:
         hdim_expanded = math.floor(DIM * 5.25)
         buffer_scale = 0.55
         value_capacity = int(bs * hdim_expanded * layers * buffer_scale)
-        bits_per_value = 15
-        buffer_size = (value_capacity * bits_per_value + 7) // 8
+        buffer_size = (value_capacity * bits_per_value(storage_dtype) + 7) // 8
         buffer = TensorBuffer(
-            buffer_size, dtype=dtype, device="cuda", pack_sbit=True
+            buffer_size, dtype=storage_dtype, device="cuda", pack_sbit=True
         )
 
-    run_step(x, model, buffer, sparse=True, pack_sbit=True, steps=warmup_steps)
-    tracking, vram_15bit, avg_time_15bit = run_step(x, model, buffer, sparse=True, pack_sbit=True, steps=eval_steps)
+    run_step(x, model, buffer, sparse=True, pack_sbit=True,
+             storage_dtype=storage_dtype, steps=warmup_steps)
+    tracking, vram_15bit, avg_time_15bit = run_step(x, model, buffer, sparse=True, pack_sbit=True,
+                                                    storage_dtype=storage_dtype, steps=eval_steps)
     print(f"Compressed 15bit: {vram_15bit = :.0f} MB, avg_time = {avg_time_15bit:.2f} ms")
     # Check correctness
-    if not torch.allclose(tracking, tracking_dn, atol=3e-6, rtol=3e-6):
+    if not torch.allclose(tracking, tracking_dn, atol=CHECK_ATOL, rtol=CHECK_RTOL):
         print("Predicted values are different.")
         print(f"{tracking_dn = }")
         print(f"{tracking = }")
-        torch.testing.assert_close(tracking, tracking_dn, atol=3e-6, rtol=3e-6)
+        torch.testing.assert_close(tracking, tracking_dn, atol=CHECK_ATOL, rtol=CHECK_RTOL)
 
     return vram_base, avg_time_base, vram_dn, avg_time_dn, vram, avg_time, vram_15bit, avg_time_15bit
 
@@ -190,8 +200,9 @@ def evaluate_nobase(model_fn, bs, warmup_steps=1, eval_steps=5, layers=LAYERS, s
     setup_hooks(model)
 
     # 2) Setup sparse buffer and run model (in basic mode layers allocate on-the-fly)
-    run_step(x, model, None, sparse=True, steps=warmup_steps)
-    tracking, vram, avg_time = run_step(x, model, None, sparse=True, pack_sbit=False, steps=eval_steps)
+    run_step(x, model, None, sparse=True, storage_dtype=DTYPE, steps=warmup_steps)
+    tracking, vram, avg_time = run_step(x, model, None, sparse=True, pack_sbit=False,
+                                        storage_dtype=DTYPE, steps=eval_steps)
     print(f"Compressed: {vram = :.0f} MB, avg_time = {avg_time:.2f} ms")
 
     return vram, avg_time

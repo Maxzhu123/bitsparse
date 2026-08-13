@@ -1,8 +1,66 @@
 import torch
 from torch import Tensor
+from torch.autograd import Function
 
 from .triton_operators import unpack_batch_, unpack_relu2_batch_
 from ..bitsparse import BitsparseTensor
+
+
+_FP8_DTYPE = torch.float8_e4m3fn
+_FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
+
+
+def _tensor_scale(x: Tensor) -> Tensor:
+    """Tensor-wise FP8 scale mapping ``max|X|`` to the largest e4m3 value."""
+    scale = (x.detach().abs().max() / _FP8_MAX).to(torch.float32)
+    return torch.where(scale == 0, torch.ones_like(scale), scale)
+
+
+class MatmulFP8(Function):
+    """``a @ b`` computed with e4m3fn operands and BF16 output.
+
+    Both operands are quantized with a tensor-wise scale and multiplied with
+    ``torch._scaled_mm`` (fp32 accumulation).  Falls back to a BF16 matmul when
+    the contraction dims are not multiples of 16.  The backward pass is the
+    straight-through estimator: gradients are computed as if the matmul were
+    plain BF16.
+    """
+
+    @staticmethod
+    def forward(ctx, a: Tensor, b: Tensor) -> Tensor:
+        if a.shape[1] % 16 == 0 and b.shape[1] % 16 == 0:
+            try:
+                a_scale = _tensor_scale(a)
+                b_scale = _tensor_scale(b)
+                a_fp8 = (a / a_scale).to(_FP8_DTYPE).contiguous()
+                b_fp8 = (b / b_scale).to(_FP8_DTYPE).contiguous()
+                out = torch._scaled_mm(
+                    a_fp8, b_fp8,
+                    scale_a=a_scale, scale_b=b_scale, out_dtype=torch.bfloat16,
+                )
+            except Exception:
+                # Unsupported shapes/heuristics in _scaled_mm: fall back to bf16.
+                out = a @ b
+        else:
+            out = a @ b
+        ctx.save_for_backward(a, b)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        a, b = ctx.saved_tensors
+        return grad_output @ b.t(), a.t() @ grad_output
+
+
+def matmul_fp8(a: Tensor, b: Tensor) -> Tensor:
+    """``a @ b`` in FP8 (e4m3fn) with tensor-wise scaling, output BF16."""
+    return MatmulFP8.apply(a, b)
+
+
+def _matmul(a: Tensor, b: Tensor, fp8: bool) -> Tensor:
+    """Matmul helper that picks the FP8 path when the sparse side is FP8."""
+    return matmul_fp8(a, b) if fp8 else a @ b
+
 
 def AspB(A: Tensor, B_sparse: BitsparseTensor, row_batch: int = 0) -> Tensor:
     """Compute ``A @ B`` where ``B`` is stored as ``BitsparseTensor``.
@@ -24,7 +82,7 @@ def AspB(A: Tensor, B_sparse: BitsparseTensor, row_batch: int = 0) -> Tensor:
         num_tiles = grid_m * grid_n
         dense = torch.empty(N, K, device=A.device, dtype=B_sparse.input_dtype)
         unpack_batch_(B_sparse, dense, 0, grid_n, K, N, num_tiles)
-        return A @ dense
+        return _matmul(A, dense, B_sparse.fp8)
 
     # Blockwise path: tile-aligned row batches so tiles are never split.
     out = torch.zeros(M, K, device=A.device, dtype=A.dtype)
@@ -67,7 +125,7 @@ def spAB(A_sparse: BitsparseTensor, B: Tensor, out: Tensor | None = None, row_ba
         num_tiles = grid_m * grid_n
         dense = torch.empty(M, N, device=B.device, dtype=A_sparse.input_dtype)
         unpack_batch_(A_sparse, dense, 0, grid_n, N, M, num_tiles)
-        return dense @ B
+        return _matmul(dense, B, A_sparse.fp8)
 
     # Blockwise path: tile-aligned row batches so tiles are never split.
     out = torch.zeros(M, K, device=B.device, dtype=B.dtype) if out is None else out
@@ -107,7 +165,7 @@ def AspRelu2B(A: Tensor, B_sparse: BitsparseTensor, row_batch: int = 0) -> Tenso
         num_tiles = grid_m * grid_n
         dense = torch.empty(N, K, device=A.device, dtype=B_sparse.input_dtype)
         unpack_relu2_batch_(B_sparse, dense, 0, grid_n, K, N, num_tiles)
-        return A @ dense
+        return _matmul(A, dense, B_sparse.fp8)
 
     # Blockwise path: tile-aligned row batches so tiles are never split.
     out = torch.zeros(M, K, device=A.device, dtype=A.dtype)
