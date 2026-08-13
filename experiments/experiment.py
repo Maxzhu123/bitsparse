@@ -23,7 +23,7 @@ DTYPE = torch.float8_e4m3fn # torch.bfloat16 #
 # Correctness tolerance: exact for bf16, loose for the fp8 quantization error.
 CHECK_RTOL = CHECK_ATOL = 3e-6 if DTYPE == torch.bfloat16 else 1e-1
 
-BASIC_MODE = True
+BASIC_MODE = False
 DATA_SPARSITY = "Sparse"        # "Normal", "Sparse", "ReLU"
 c_print(f'{DATA_SPARSITY = }', color="green")
 # ------------------------------------------------------------------------------
