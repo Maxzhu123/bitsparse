@@ -8,17 +8,17 @@ import gc
 from cprint import c_print
 import os
 
-from config import RELU2_SCALE
 from experiments.utils import setup_hooks
 from lib_sparse.bitsparse import TensorBuffer, bits_per_value
+from lib_sparse.config import RELU2_SCALE
 
-LAYERS = 8
+LAYERS = 4
 BATCH_SIZE = 10000
 DIM = 4096
 
 # Datatype flag: torch.bfloat16 or torch.float8_e4m3fn.  FP8 quantizes the
 # forward matmuls (fp8 + fp8 -> bf16) and stores saved activations in FP8.
-DTYPE = getattr(torch, os.environ.get("DTYPE", "bfloat16"))
+DTYPE = torch.bfloat16
 
 # Correctness tolerance: exact for bf16, loose for the fp8 quantization error.
 CHECK_RTOL = CHECK_ATOL = 3e-6 if DTYPE == torch.bfloat16 else 1e-1

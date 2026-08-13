@@ -7,7 +7,7 @@ from .src.functions import dense_to_tilesparse
 from .src.sparse_matmul import AspB, AspRelu2B, matmul_fp8
 from .src.triton_operators import mask_with_bitmask_, relu2_grad_sparse_
 from .bitsparse import BitsparseTensor, is_fp8
-from config import RELU2_SCALE
+from .config import RELU2_SCALE
 
 if TYPE_CHECKING:
     from bitsparse import TensorBuffer

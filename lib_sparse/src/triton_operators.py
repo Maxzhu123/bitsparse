@@ -10,7 +10,7 @@ from .triton_kernels import (
     _relu2_grad_sparse_kernel,
 )
 from ..bitsparse import BitsparseTensor, bits_per_value, is_fp8, pack_codec
-from config import RELU2_SCALE, _PACK_CHUNK_TILES
+from ..config import RELU2_SCALE, _PACK_CHUNK_TILES
 from .bitpacking import (
     _pack_kernel,
     packed_nbytes,

@@ -27,6 +27,7 @@ def matmul_fp8(a: Tensor, b: Tensor) -> Tensor:
             a_fp8, b_fp8,
             scale_a=a_scale, scale_b=b_scale, out_dtype=torch.bfloat16,
         )
+        return out
     except Exception:
         # Unsupported shapes/heuristics in _scaled_mm: fall back to bf16.
         raise ValueError(
