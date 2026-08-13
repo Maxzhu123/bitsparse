@@ -88,11 +88,13 @@ def spAB(A_sparse: BitsparseTensor, B: Tensor, out: Tensor | None = None, row_ba
     return out
 
 
-def AspRelu2B(A: Tensor, B_sparse: BitsparseTensor, row_batch: int = 0) -> Tensor:
+def AspRelu2B(A: Tensor, B_sparse: BitsparseTensor, A_scale: Tensor|None=None, row_batch: int = 0) -> Tensor:
     """Compute A @ (k * B^2) where sparse B = relu(preact), elementwise square for activation.
 
     Shapes: ``A[M, N]`` and sparse ``B[N, K]`` produce ``out[M, K]``.
-    Unpacks ``k * B^2`` to dense before matmul.
+    Unpacks ``k * B^2`` to dense before matmul.  The squared reconstruction is
+    materialised in BF16 (squaring overflows the FP8 storage range) and then
+    re-quantised by the FP8 matmul.
 
     By default the whole sparse ``B`` is unpacked at once.  When ``row_batch > 0``,
     rows of ``B`` are unpacked in tile-aligned batches of at most ``row_batch`` rows
@@ -106,9 +108,9 @@ def AspRelu2B(A: Tensor, B_sparse: BitsparseTensor, row_batch: int = 0) -> Tenso
 
     if row_batch <= 0:
         num_tiles = grid_m * grid_n
-        dense = torch.empty(N, K, device=A.device, dtype=B_sparse.dtype)
+        dense = torch.empty(N, K, device=A.device, dtype=torch.bfloat16)
         unpack_relu2_batch_(B_sparse, dense, 0, grid_n, K, N, num_tiles)
-        return matmul(A, dense, B_sparse.fp8, b_scale=B_sparse.scale)
+        return matmul(A, dense, B_sparse.fp8, a_scale=A_scale)
 
     # Blockwise path: tile-aligned row batches so tiles are never split.
     out = torch.zeros(M, K, device=A.device, dtype=A.dtype)
@@ -121,7 +123,7 @@ def AspRelu2B(A: Tensor, B_sparse: BitsparseTensor, row_batch: int = 0) -> Tenso
         num_row_tiles = (batch_rows + BLOCK_M - 1) // BLOCK_M
         num_tiles_in_batch = num_row_tiles * grid_n
 
-        dense_batch = torch.empty(batch_rows, K, device=A.device, dtype=B_sparse.dtype)
+        dense_batch = torch.empty(batch_rows, K, device=A.device, dtype=torch.bfloat16)
         unpack_relu2_batch_(B_sparse, dense_batch, first_n_tile, grid_n, K, batch_rows,
                             num_tiles_in_batch)
         A_batch = A[:, n_start:n_end]

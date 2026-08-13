@@ -58,14 +58,18 @@ class ReluLinear(Function):
         h: BitsparseTensor = ctx.h_sparse
         ctx.h_sparse = None
 
-        grad_output_fp8, scale = to_fp8(grad_output)
-        del grad_output
+        fp8 = is_fp8(ctx.dtype)
+        if fp8:
+            grad_output_fp8, scale = to_fp8(grad_output)
+            del grad_output
+        else:
+            grad_output_fp8, scale = grad_output, None
 
         grad_W2 = AspB(grad_output_fp8.T.contiguous(), h, A_scale=scale)
 
         # Gradients for input
         if needs_z:
-            grad_h = matmul(grad_output_fp8, W, fp8=is_fp8(ctx.dtype), a_scale=scale)
+            grad_h = matmul(grad_output_fp8, W, fp8=fp8, a_scale=scale)
             grad_z = mask_with_bitmask_(grad_h, h)
         else:
             grad_z = None
@@ -120,10 +124,20 @@ class Relu2Linear(Function):
     def forward(ctx, z, W, sparse_data:TensorBuffer|None, pack_sbit: bool=False,
                 storage_dtype: torch.dtype = torch.bfloat16):
         """ relu(Wx) layer. """
+        ctx.dtype = storage_dtype
         ctx.save_for_backward(W)
         h = z.relu_()
-        h_sparse = dense_to_tilesparse(h, sparse_data, pack_sbit, storage_dtype)
+
+        # Quantize input if needed
+        if is_fp8(storage_dtype):
+            h_stored, scale = to_fp8(h)
+        else:
+            h_stored, scale = h, None
+
+        h_sparse = dense_to_tilesparse(h_stored, scale, sparse_data, pack_sbit)
         ctx.h_sparse = h_sparse
+
+        # Forward matmul uses the squared activation
         h.square_()
         h.mul_(RELU2_SCALE)
         y = matmul(h, W.T, is_fp8(storage_dtype))
@@ -138,11 +152,18 @@ class Relu2Linear(Function):
         h: BitsparseTensor = ctx.h_sparse
         ctx.h_sparse = None
 
-        grad_W2 = AspRelu2B(grad_output.T, h)
+        fp8 = is_fp8(ctx.dtype)
+        if fp8:
+            grad_output_fp8, scale = to_fp8(grad_output)
+            del grad_output
+        else:
+            grad_output_fp8, scale = grad_output, None
+
+        grad_W2 = AspRelu2B(grad_output_fp8.T.contiguous(), h, A_scale=scale)
 
         # Needs gradient for z
         if needs_z:
-            grad_h = grad_output @ W
+            grad_h = matmul(grad_output_fp8, W, fp8=fp8, a_scale=scale)
             grad_z = relu2_grad_sparse_(grad_h, h)
         else:
             grad_z = None

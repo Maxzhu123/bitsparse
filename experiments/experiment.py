@@ -17,9 +17,8 @@ LAYERS = 4
 BATCH_SIZE = 10000
 DIM = 4096
 
-# Datatype flag: torch.bfloat16 or torch.float8_e4m3fn.  FP8 quantizes the
-# forward matmuls (fp8 + fp8 -> bf16) and stores saved activations in FP8.
-DTYPE = torch.float8_e4m3fn # torch.bfloat16 #
+# Datatype for matmul + activation caching: torch.bfloat16 or torch.float8_e4m3fn.
+DTYPE = torch.float8_e4m3fn # torch.bfloat16
 
 # Correctness tolerance: exact for bf16, loose for the fp8 quantization error.
 CHECK_RTOL = CHECK_ATOL = 3e-6 if DTYPE == torch.bfloat16 else 1e-1
@@ -240,34 +239,43 @@ def gen_params(dim, G, dtype, expansion=5.25, device="cuda"):
 # Baseline FFN layers parameters
 # ------------------------------------------------------------------------------
 class FFNRelu2_2(Function):
+    """Dense baseline autograd FFN with ReLU² activation for comparison.
+
+    For ``x[B, D]``, ``W1[H, D]``, and ``W2[D, H]`` computes
+    ``z = RELU2_SCALE * relu(x @ W1.T)²`` and ``output = z @ W2.T``.  The
+    forward matmuls are quantized to FP8 (fp8 + fp8 -> bf16) while activations
+    stay in BF16, matching the ``lib_sparse.layers`` FFN.
+    """
     @staticmethod
     def forward(ctx, x, W1, W2):
-        z = x @ W1.T
+        fp8 = is_fp8(DTYPE)
+        z = matmul(x, W1.T, fp8)
         r = z.relu_()
         z = r.square()
         z.mul_(RELU2_SCALE)
         ctx.save_for_backward(x, W1, W2, r)
-        return z @ W2.T
+        return matmul(z, W2.T, fp8)
 
     @staticmethod
     def backward(ctx, grad_output):
         x, W1, W2, r = ctx.saved_tensors
         needs_x = ctx.needs_input_grad[0]
+        fp8 = is_fp8(DTYPE)
 
         z = r.square().mul_(RELU2_SCALE)
-        grad_W2 = grad_output.T @ z
+        grad_W2 = matmul(grad_output.T, z, fp8)
         del z
-        grad_z = grad_output @ W2
+        grad_z = matmul(grad_output, W2, fp8)
         grad_preact = grad_z * (2.0 * RELU2_SCALE * r)
         del grad_z, r
-        grad_W1 = grad_preact.T @ x
+        grad_W1 = matmul(grad_preact.T, x, fp8)
 
         if not torch.compiler.is_compiling():
             ctx.maybe_clear_saved_tensors()
 
         grad_x = None
         if needs_x:
-            grad_x = grad_preact @ W1
+            grad_x = matmul(grad_preact, W1, fp8)
         return grad_x, grad_W1, grad_W2
 
     @staticmethod
@@ -276,11 +284,13 @@ class FFNRelu2_2(Function):
 
     @staticmethod
     def forward_ckpt(x, W1, W2):
-        z = x @ W1.T
+        """Run the dense FFN forward pass and save tensors for backward."""
+        fp8 = is_fp8(DTYPE)
+        z = matmul(x, W1.T, fp8)
         r = z.relu_()
         z = r.square()
         z.mul_(RELU2_SCALE)
-        return z @ W2.T
+        return matmul(z, W2.T, fp8)
 
 
 class FFN(Function):
