@@ -3,7 +3,7 @@ import os
 import torch
 from torch import Tensor
 
-from lib_sparse.bitsparse import BitsparseTensor, TensorBuffer
+from lib_sparse.bitsparse import BitsparseTensor, TensorBuffer, bits_per_value
 from lib_sparse.src.functions import dense_to_tilesparse
 from lib_sparse.src.triton_operators import unpack_batch_
 
@@ -56,7 +56,7 @@ def validate_sparse(dense: Tensor, sparse: BitsparseTensor) -> None:
     if sparse.scale is not None:
         # Scaled FP8 rounds to the nearest representable step, so compare within
         # the quantization error (eps is 0.125 for e4m3fn, 0.25 for e5m2).
-        eps = torch.finfo(sparse.vals.dtype).eps
+        eps = torch.finfo(sparse.storage_dtype).eps
         torch.testing.assert_close(
             restored,
             dense,
@@ -78,7 +78,7 @@ def make_buffer(
     if pack_sbit:
         # Each allocation may align its logical value offset to eight values.
         capacity += 7 * len(tensors)
-        size = (capacity * 15 + 7) // 8
+        size = (capacity * bits_per_value(storage_dtype) + 7) // 8
     else:
         size = capacity * torch.empty((), dtype=storage_dtype).element_size()
     return TensorBuffer(
@@ -107,9 +107,7 @@ def main() -> None:
 
     generator = torch.Generator(device="cuda").manual_seed(0)
     passed = 0
-    pack_sbit_options = (
-        (False, True) if VALIDATION_DTYPE == torch.bfloat16 else (False,)
-    )
+    pack_sbit_options = (False, True)
     total_checks = (
         len(SHAPES) * len(SPARSITIES) * len(pack_sbit_options) * 2
     )

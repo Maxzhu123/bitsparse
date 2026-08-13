@@ -68,11 +68,6 @@ def dense_to_tilesparse(
         storage_dtype = (
             sparse_data.dtype if sparse_data is not None else dense.dtype
         )
-    if pack_sbit and storage_dtype != torch.bfloat16:
-        raise ValueError(
-            "pack_sbit uses the BF16-specific 15-bit codec and cannot be "
-            f"combined with storage dtype {storage_dtype}"
-        )
 
     scale = (
         _compute_scale(dense, storage_dtype)
@@ -110,5 +105,5 @@ def dense_to_tilesparse(
         vals, tile_bitmasks, tile_prefix,
         grid_m, grid_n, BLOCK_M, BLOCK_N, dense.shape,
         dense.dtype, scale,
-        vals_offset=vals_offset, pack_sbit=pack_sbit,
+        vals_offset=vals_offset, pack_sbit=pack_sbit, storage_dtype=storage_dtype,
     )

@@ -10,7 +10,7 @@ from lib_sparse.src.triton_operators import unpack_batch_
 
 
 DEFAULT_SHAPES = ((1000, 4096), (4000, 4096), (15000, 4096))
-PACK_SBIT = False
+PACK_SBIT = os.environ.get("PACK_SBIT", "0") == "1"
 BENCHMARK_DTYPE = getattr(
     torch, os.environ.get("BENCHMARK_DTYPE", "bfloat16")
 )
@@ -113,9 +113,6 @@ def benchmark_shape(
 
 
 def main() -> None:
-    if PACK_SBIT and BENCHMARK_DTYPE != torch.bfloat16:
-        raise ValueError("PACK_SBIT is only supported with BF16 storage")
-
     shapes = DEFAULT_SHAPES
     n = 8
     sp_ratios = [0.5, 0.8]

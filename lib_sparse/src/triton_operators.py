@@ -9,10 +9,10 @@ from .triton_kernels import (
     _relu_grad_sparse_kernel,
     _relu2_grad_sparse_kernel,
 )
-from ..bitsparse import BitsparseTensor, is_fp8
-from config import RELU2_SCALE, _PACK_15BIT_CHUNK_TILES
+from ..bitsparse import BitsparseTensor, bits_per_value, is_fp8, pack_codec
+from config import RELU2_SCALE, _PACK_CHUNK_TILES
 from .bitpacking import (
-    _pack_15bit_kernel,
+    _pack_kernel,
     packed_nbytes,
     packed_storage_nbytes,
 )
@@ -42,7 +42,7 @@ def compact_vals(
     scale: Tensor | None = None,
 ) -> tuple[Tensor, Tensor]:
     """ Compact positive values into standalone or preallocated storage.
-        Supports 15-bit packing, FP8 quantization, and preallocated vals buffer. """
+        Supports bit packing, FP8 quantization, and preallocated vals buffer. """
     if is_fp8(storage_dtype) and dense.dtype != storage_dtype:
         # Quantize BF16 inputs outside the kernel; the kernel is dtype-agnostic.
         # FP8 inputs are already FP8 and skip the scale.
@@ -52,13 +52,18 @@ def compact_vals(
     if standalone:
         nnz = int(tile_prefix[-1].item())
         staging_numel = nnz
-        size = packed_storage_nbytes(nnz) if pack_sbit else nnz
+        size = (
+            packed_storage_nbytes(nnz, bits_per_value(storage_dtype))
+            if pack_sbit
+            else nnz
+        )
         dtype = torch.uint8 if pack_sbit else storage_dtype
         vals = torch.empty(size, device=dense.device, dtype=dtype)
         vals_offset = torch.zeros((), device=dense.device, dtype=torch.int64)
 
     if pack_sbit:
-        chunk_tiles = min(num_tiles, _PACK_15BIT_CHUNK_TILES)
+        codec = pack_codec(storage_dtype)
+        chunk_tiles = min(num_tiles, _PACK_CHUNK_TILES)
         chunk_numels = None
         if standalone:
             # Prefix boundaries give exact chunk sizes after the sync above.
@@ -92,12 +97,14 @@ def compact_vals(
                 if chunk_numels is not None
                 else tiles_in_chunk * TILE_NUMEL
             )
-            launch_bytes = packed_nbytes(launch_numel) + 1
-            _pack_15bit_kernel[
+            launch_bytes = packed_nbytes(launch_numel, bits_per_value(storage_dtype)) + 1
+            _pack_kernel[
                 lambda meta: (triton.cdiv(launch_bytes, meta["BLOCK_SIZE"]),)
             ](
-                raw_vals.view(torch.uint16), vals, vals_offset,
+                raw_vals.view(torch.uint16 if codec == 0 else torch.uint8),
+                vals, vals_offset,
                 tile_prefix, first_tile, tiles_in_chunk,
+                CODEC=codec,
             )
         return vals, vals_offset
 
@@ -126,7 +133,7 @@ def unpack_batch_(
         vals, sparse.bitmask, sparse.prefix, sparse.vals_offset,
         output,
         first_m_tile, grid_n, K, batch_rows,
-        False, 0, sparse.pack_sbit, sparse.fp8,
+        False, 0, sparse.pack_sbit, sparse.fp8, pack_codec(sparse.storage_dtype),
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
     )
@@ -150,7 +157,7 @@ def unpack_relu2_batch_(
         vals, sparse.bitmask, sparse.prefix, sparse.vals_offset,
         output,
         first_m_tile, grid_n, K, batch_rows,
-        True, RELU2_SCALE, sparse.pack_sbit, sparse.fp8,
+        True, RELU2_SCALE, sparse.pack_sbit, sparse.fp8, pack_codec(sparse.storage_dtype),
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
     )
@@ -188,7 +195,7 @@ def relu2_grad_sparse_(grad: Tensor, sparse_z: BitsparseTensor) -> Tensor:
     _relu2_grad_sparse_kernel[(sparse_z.grid_m, sparse_z.grid_n)](
         grad, vals, sparse_z.bitmask, sparse_z.prefix, sparse_z.vals_offset,
         sparse_z.shape[0], sparse_z.shape[1],
-        sparse_z.pack_sbit, sparse_z.fp8,
+        sparse_z.pack_sbit, sparse_z.fp8, pack_codec(sparse_z.storage_dtype),
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N,
         TILE_BYTES=BLOCK_M * BLOCK_N // 8,
