@@ -20,19 +20,19 @@ def is_fp8(dtype) -> bool:
 class BitsparseTensor:
     """Tile-wise bitmask sparse tensor for a dense matrix of shape ``shape``.
     """
-    vals: Tensor            # Positive entries in row-major tile order. Can use a shared value buffer.
+    vals: Tensor            # Positive entries in row-major tile order. dtype is the storage dtype.
     bitmask: Tensor         # One bit per element, in row-major tile order. uint8 packed dtype.
     prefix: Tensor          # Starting logical-value offset of each tile in ``vals``. uint32 dtype.
     vals_offset: Tensor     # Offset where values in this tensor start in vals. 0 if not using shared buffer
+    input_dtype: torch.dtype    # dtype of the original (and reconstructed) tensor
     BLOCK_M: int
     BLOCK_N: int
     grid_m: int
     grid_n: int
 
     def __init__(self, vals, bitmask, prefix,
-                 grid_m, grid_n, BLOCK_M, BLOCK_N, shape,
-                 vals_offset=None, pack_sbit=False, value_dtype=None,
-                 output_dtype=None, scale=None):
+                 grid_m, grid_n, BLOCK_M, BLOCK_N, shape, input_dtype,
+                 scale=None, vals_offset=None, pack_sbit=False):
         """Store compressed values and tile metadata for later unpack/masking."""
         self.vals = vals
         self.bitmask = bitmask
@@ -41,8 +41,7 @@ class BitsparseTensor:
             vals_offset = torch.tensor(0, device=vals.device, dtype=torch.int64)
         self.vals_offset = vals_offset
         self.pack_sbit = pack_sbit
-        self.value_dtype = vals.dtype if value_dtype is None else value_dtype
-        self.output_dtype = self.value_dtype if output_dtype is None else output_dtype
+        self.input_dtype = input_dtype
         self.scale = scale
         self.grid_m = grid_m
         self.grid_n = grid_n
@@ -53,7 +52,7 @@ class BitsparseTensor:
     @property
     def fp8(self) -> bool:
         """True when values are stored as FP8 (e4m3fn or e5m2) instead of BF16."""
-        return is_fp8(self.value_dtype)
+        return is_fp8(self.vals.dtype)
 
     def __repr__(self):
         return (f"BitsparseTensor(shape={list(self.shape)}, "

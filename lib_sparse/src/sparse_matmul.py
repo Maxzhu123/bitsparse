@@ -22,7 +22,7 @@ def AspB(A: Tensor, B_sparse: BitsparseTensor, row_batch: int = 0) -> Tensor:
 
     if row_batch <= 0:
         num_tiles = grid_m * grid_n
-        dense = torch.empty(N, K, device=A.device, dtype=B_sparse.output_dtype)
+        dense = torch.empty(N, K, device=A.device, dtype=B_sparse.input_dtype)
         unpack_batch_(B_sparse, dense, 0, grid_n, K, N, num_tiles)
         return A @ dense
 
@@ -37,7 +37,7 @@ def AspB(A: Tensor, B_sparse: BitsparseTensor, row_batch: int = 0) -> Tensor:
         num_row_tiles = (batch_rows + BLOCK_M - 1) // BLOCK_M
         num_tiles_in_batch = num_row_tiles * grid_n
 
-        dense_batch = torch.empty(batch_rows, K, device=A.device, dtype=B_sparse.output_dtype)
+        dense_batch = torch.empty(batch_rows, K, device=A.device, dtype=B_sparse.input_dtype)
         unpack_batch_(B_sparse, dense_batch, first_n_tile, grid_n, K, batch_rows,
                       num_tiles_in_batch)
         A_batch = A[:, n_start:n_end]
@@ -65,7 +65,7 @@ def spAB(A_sparse: BitsparseTensor, B: Tensor, out: Tensor | None = None, row_ba
 
     if row_batch <= 0:
         num_tiles = grid_m * grid_n
-        dense = torch.empty(M, N, device=B.device, dtype=A_sparse.output_dtype)
+        dense = torch.empty(M, N, device=B.device, dtype=A_sparse.input_dtype)
         unpack_batch_(A_sparse, dense, 0, grid_n, N, M, num_tiles)
         return dense @ B
 
@@ -80,7 +80,7 @@ def spAB(A_sparse: BitsparseTensor, B: Tensor, out: Tensor | None = None, row_ba
         num_row_tiles = (batch_rows + BLOCK_M - 1) // BLOCK_M
         num_tiles_in_batch = num_row_tiles * grid_n
 
-        dense_batch = torch.empty(batch_rows, N, device=B.device, dtype=A_sparse.output_dtype)
+        dense_batch = torch.empty(batch_rows, N, device=B.device, dtype=A_sparse.input_dtype)
         unpack_batch_(A_sparse, dense_batch, first_m_tile, grid_n, N, batch_rows,
                       num_tiles_in_batch)
         torch.mm(dense_batch, B, out=out[m_start:m_end])
@@ -105,7 +105,7 @@ def AspRelu2B(A: Tensor, B_sparse: BitsparseTensor, row_batch: int = 0) -> Tenso
 
     if row_batch <= 0:
         num_tiles = grid_m * grid_n
-        dense = torch.empty(N, K, device=A.device, dtype=B_sparse.output_dtype)
+        dense = torch.empty(N, K, device=A.device, dtype=B_sparse.input_dtype)
         unpack_relu2_batch_(B_sparse, dense, 0, grid_n, K, N, num_tiles)
         return A @ dense
 
@@ -120,7 +120,7 @@ def AspRelu2B(A: Tensor, B_sparse: BitsparseTensor, row_batch: int = 0) -> Tenso
         num_row_tiles = (batch_rows + BLOCK_M - 1) // BLOCK_M
         num_tiles_in_batch = num_row_tiles * grid_n
 
-        dense_batch = torch.empty(batch_rows, K, device=A.device, dtype=B_sparse.output_dtype)
+        dense_batch = torch.empty(batch_rows, K, device=A.device, dtype=B_sparse.input_dtype)
         unpack_relu2_batch_(B_sparse, dense_batch, first_n_tile, grid_n, K, batch_rows,
                             num_tiles_in_batch)
         A_batch = A[:, n_start:n_end]

@@ -109,6 +109,6 @@ def dense_to_tilesparse(
     return BitsparseTensor(
         vals, tile_bitmasks, tile_prefix,
         grid_m, grid_n, BLOCK_M, BLOCK_N, dense.shape,
+        dense.dtype, scale,
         vals_offset=vals_offset, pack_sbit=pack_sbit,
-        value_dtype=storage_dtype, output_dtype=dense.dtype, scale=scale,
     )
