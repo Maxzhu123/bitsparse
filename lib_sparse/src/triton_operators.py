@@ -9,7 +9,7 @@ from .triton_kernels import (
     _relu_grad_sparse_kernel,
     _relu2_grad_sparse_kernel,
 )
-from ..bitsparse import BitsparseTensor, bits_per_value, is_fp8, pack_codec
+from ..bitsparse import BitsparseTensor, bits_per_value, pack_codec
 from ..config import RELU2_SCALE, _PACK_CHUNK_TILES
 from .bitpacking import (
     _pack_kernel,
@@ -130,12 +130,11 @@ def unpack_batch_(
         vals, sparse.bitmask, sparse.prefix, sparse.vals_offset,
         output,
         first_m_tile, grid_n, K, batch_rows,
-        False, 0, sparse.pack_sbit, sparse.fp8, pack_codec(sparse.input_dtype),
+        False, 0, sparse.pack_sbit, sparse.fp8, pack_codec(sparse.dtype),
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
     )
-    # if sparse.scale is not None:
-    #     output.mul_(sparse.scale)
+
     return output
 
 
@@ -154,7 +153,7 @@ def unpack_relu2_batch_(
         vals, sparse.bitmask, sparse.prefix, sparse.vals_offset,
         output,
         first_m_tile, grid_n, K, batch_rows,
-        True, RELU2_SCALE, sparse.pack_sbit, sparse.fp8, pack_codec(sparse.input_dtype),
+        True, RELU2_SCALE, sparse.pack_sbit, sparse.fp8, pack_codec(sparse.dtype),
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N, TILE_BYTES=BLOCK_M * BLOCK_N // 8,
     )
@@ -192,7 +191,7 @@ def relu2_grad_sparse_(grad: Tensor, sparse_z: BitsparseTensor) -> Tensor:
     _relu2_grad_sparse_kernel[(sparse_z.grid_m, sparse_z.grid_n)](
         grad, vals, sparse_z.bitmask, sparse_z.prefix, sparse_z.vals_offset,
         sparse_z.shape[0], sparse_z.shape[1],
-        sparse_z.pack_sbit, sparse_z.fp8, pack_codec(sparse_z.input_dtype),
+        sparse_z.pack_sbit, sparse_z.fp8, pack_codec(sparse_z.dtype),
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
         TILE_NUMEL=BLOCK_M * BLOCK_N,
         TILE_BYTES=BLOCK_M * BLOCK_N // 8,

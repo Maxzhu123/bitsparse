@@ -3,14 +3,24 @@ import torch
 from torch import Tensor
 from torch.autograd import Function
 
-from .src.functions import dense_to_tilesparse, to_fp8
-from .src.sparse_matmul import AspB, AspRelu2B, matmul
+from .src.functions import dense_to_tilesparse
+from .src.sparse_matmul import AspB, AspRelu2B
 from .src.triton_operators import mask_with_bitmask_, relu2_grad_sparse_
-from .bitsparse import BitsparseTensor, is_fp8
+from .bitsparse import BitsparseTensor
+from .fp8 import is_fp8, matmul, to_fp8
 from .config import RELU2_SCALE
 
 if TYPE_CHECKING:
     from bitsparse import TensorBuffer
+
+
+def print_memory(msg, max=True):
+    from cprint import c_print
+    if max:
+        memory = torch.cuda.max_memory_allocated("cuda") / 1024 ** 2
+    else:
+        memory = torch.cuda.memory_allocated("cuda") / 1024 ** 2
+    c_print(f'{msg}: {memory:.2f} MB', color="bright_cyan")
 
 
 # ------------------------------------------------------------
@@ -23,6 +33,7 @@ class ReluLinear(Function):
     def forward(ctx, z, W, sparse_data:TensorBuffer|None=None, pack_sbit: bool=False,
                 dtype: torch.dtype=torch.bfloat16):
         """ relu(Wx) layer. """
+        ctx.dtype = dtype
         ctx.save_for_backward(W)
         h = z.relu_()
 
@@ -33,6 +44,7 @@ class ReluLinear(Function):
             scale = None
 
         h_sparse = dense_to_tilesparse(h, scale, sparse_data, pack_sbit)
+
         ctx.h_sparse = h_sparse
         y = matmul(h, W.T, is_fp8(dtype), a_scale=scale)
         return y
@@ -46,11 +58,14 @@ class ReluLinear(Function):
         h: BitsparseTensor = ctx.h_sparse
         ctx.h_sparse = None
 
-        grad_W2 = AspB(grad_output.T, h)
+        grad_output_fp8, scale = to_fp8(grad_output)
+        del grad_output
+
+        grad_W2 = AspB(grad_output_fp8.T.contiguous(), h, A_scale=scale)
 
         # Gradients for input
         if needs_z:
-            grad_h = grad_output @ W
+            grad_h = matmul(grad_output_fp8, W, fp8=is_fp8(ctx.dtype), a_scale=scale)
             grad_z = mask_with_bitmask_(grad_h, h)
         else:
             grad_z = None

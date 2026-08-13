@@ -38,7 +38,7 @@ def decompress(sparse: BitsparseTensor) -> Tensor:
     output = torch.empty(
         (rows, columns),
         device=sparse.vals.device,
-        dtype=sparse.input_dtype,
+        dtype=sparse.dtype,
     )
     return unpack_batch_(
         sparse,
@@ -56,7 +56,7 @@ def validate_sparse(dense: Tensor, sparse: BitsparseTensor) -> None:
     if sparse.scale is not None:
         # Scaled FP8 rounds to the nearest representable step, so compare within
         # the quantization error (eps is 0.125 for e4m3fn, 0.25 for e5m2).
-        eps = torch.finfo(sparse.input_dtype).eps
+        eps = torch.finfo(sparse.dtype).eps
         torch.testing.assert_close(
             restored,
             dense,
@@ -98,7 +98,7 @@ def compress(
     kwargs = {"sparse_data": buffer, "pack_sbit": pack_sbit}
     if storage_dtype != torch.bfloat16:
         kwargs["storage_dtype"] = storage_dtype
-    return dense_to_tilesparse(dense, **kwargs)
+    return dense_to_tilesparse(dense, scale=None, **kwargs)
 
 
 def main() -> None:

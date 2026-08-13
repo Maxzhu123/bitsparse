@@ -1,20 +1,8 @@
 import torch
 from torch import Tensor
 
+from .fp8 import is_fp8
 from .src.bitpacking import packed_nbytes
-
-
-_FP8_DTYPES = tuple(
-    d for d in (
-        getattr(torch, "float8_e4m3fn", None),
-        getattr(torch, "float8_e5m2", None),
-    ) if d is not None
-)
-
-
-def is_fp8(dtype) -> bool:
-    """True for the supported 8-bit float storage dtypes (e4m3fn, e5m2)."""
-    return dtype in _FP8_DTYPES
 
 
 def pack_codec(dtype) -> int:
@@ -42,14 +30,14 @@ class BitsparseTensor:
     bitmask: Tensor         # One bit per element, in row-major tile order. uint8 packed dtype.
     prefix: Tensor          # Starting logical-value offset of each tile in ``vals``. uint32 dtype.
     vals_offset: Tensor     # Offset where values in this tensor start in vals. 0 if not using shared buffer
-    input_dtype: torch.dtype    # dtype of the original (and reconstructed) tensor
+    dtype: torch.dtype    # dtype of the original (and reconstructed) tensor
     BLOCK_M: int
     BLOCK_N: int
     grid_m: int
     grid_n: int
 
-    def __init__(self, vals, bitmask, prefix,
-                 grid_m, grid_n, BLOCK_M, BLOCK_N, shape, input_dtype,
+    def __init__(self, vals, bitmask, prefix, shape, dtype,
+                 grid_m, grid_n, BLOCK_M, BLOCK_N,
                  scale=None, vals_offset=None, pack_sbit=False):
         """Store compressed values and tile metadata for later unpack/masking."""
         self.vals = vals
@@ -59,7 +47,7 @@ class BitsparseTensor:
             vals_offset = torch.tensor(0, device=vals.device, dtype=torch.int64)
         self.vals_offset = vals_offset
         self.pack_sbit = pack_sbit
-        self.input_dtype = input_dtype
+        self.dtype = dtype
         # Logical dtype of the stored values; for pack_sbit ``vals`` is a raw
         # uint8 bitstream, so the logical dtype must be carried separately.
         # self.input_dtype = vals.dtype if storage_dtype is None else storage_dtype
@@ -73,7 +61,7 @@ class BitsparseTensor:
     @property
     def fp8(self) -> bool:
         """True when values are stored as FP8 (e4m3fn or e5m2) instead of BF16."""
-        return is_fp8(self.input_dtype)
+        return is_fp8(self.dtype)
 
     def __repr__(self):
         return (f"BitsparseTensor(shape={list(self.shape)}, "
@@ -88,7 +76,7 @@ class BitsparseTensor:
     def vram_size(self):
         nnz = int(self.prefix[-1].item())
         if self.pack_sbit:
-            val_size = packed_nbytes(nnz, bits_per_value(self.input_dtype))
+            val_size = packed_nbytes(nnz, bits_per_value(self.dtype))
         else:
             val_size = nnz * self.vals.element_size()
         bitmask_size = self.bitmask.element_size() * self.bitmask.nelement()

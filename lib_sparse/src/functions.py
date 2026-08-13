@@ -4,11 +4,9 @@ import torch
 from torch import Tensor
 
 from .triton_operators import compact_vals, tile_pack
-from ..bitsparse import BitsparseTensor, TensorBuffer, is_fp8, tile_grid
+from ..bitsparse import BitsparseTensor, TensorBuffer, tile_grid
+from ..fp8 import is_fp8
 from ..config import BLOCK_M, BLOCK_N
-
-_FP8_DTYPE = torch.float8_e4m3fn
-_FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 
 class _PreparedTiles(NamedTuple):
@@ -94,16 +92,10 @@ def dense_to_tilesparse(
         sparse_data.offset.copy_(vals_offset + tile_prefix[-1])
 
     return BitsparseTensor(
-        vals, tile_bitmasks, tile_prefix,
-        grid_m, grid_n, BLOCK_M, BLOCK_N, dense.shape,
-        dense.dtype, scale,
+        vals, tile_bitmasks, tile_prefix, dense.shape, dense.dtype,
+        grid_m, grid_n, BLOCK_M, BLOCK_N,
+        scale=scale,
         vals_offset=vals_offset, pack_sbit=pack_sbit,
     )
 
-
-def to_fp8(x: Tensor) -> tuple[Tensor, Tensor]:
-    scale = (x.detach().abs().max() / _FP8_MAX).to(torch.float32)
-    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
-    x_fp8 = (x / scale).to(_FP8_DTYPE).contiguous()
-    return x_fp8, scale
 
