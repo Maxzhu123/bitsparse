@@ -4,6 +4,19 @@ from torch import Tensor
 from .src.bitpacking import packed_nbytes
 
 
+_FP8_DTYPES = tuple(
+    d for d in (
+        getattr(torch, "float8_e4m3fn", None),
+        getattr(torch, "float8_e5m2", None),
+    ) if d is not None
+)
+
+
+def is_fp8(dtype) -> bool:
+    """True for the supported 8-bit float storage dtypes (e4m3fn, e5m2)."""
+    return dtype in _FP8_DTYPES
+
+
 class BitsparseTensor:
     """Tile-wise bitmask sparse tensor for a dense matrix of shape ``shape``.
     """
@@ -39,8 +52,8 @@ class BitsparseTensor:
 
     @property
     def fp8(self) -> bool:
-        """True when values are stored as FP8 (e4m3) instead of BF16."""
-        return self.value_dtype == torch.float8_e4m3fn
+        """True when values are stored as FP8 (e4m3fn or e5m2) instead of BF16."""
+        return is_fp8(self.value_dtype)
 
     def __repr__(self):
         return (f"BitsparseTensor(shape={list(self.shape)}, "

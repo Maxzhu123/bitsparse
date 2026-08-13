@@ -4,11 +4,8 @@ import torch
 from torch import Tensor
 
 from .triton_operators import compact_vals, tile_pack
-from ..bitsparse import BitsparseTensor, TensorBuffer, tile_grid
+from ..bitsparse import BitsparseTensor, TensorBuffer, is_fp8, tile_grid
 from config import BLOCK_M, BLOCK_N
-
-
-_FP8_DTYPE = getattr(torch, "float8_e4m3fn", None)
 
 
 class _PreparedTiles(NamedTuple):
@@ -24,8 +21,8 @@ class _PreparedTiles(NamedTuple):
 
 def _prepare_tiles(dense: Tensor) -> _PreparedTiles:
     """Create tile masks and enqueue the logical nonzero prefix sum."""
-    if dense.dtype not in (torch.bfloat16, _FP8_DTYPE):
-        raise TypeError("BitsparseTensor supports bfloat16 and float8_e4m3fn values")
+    if dense.dtype != torch.bfloat16 and not is_fp8(dense.dtype):
+        raise TypeError("BitsparseTensor supports bfloat16 and FP8 (e4m3fn/e5m2) values")
     M, N = dense.shape
     grid_m, grid_n, num_tiles, TILE_NUMEL, TILE_BYTES = tile_grid(M, N, BLOCK_M, BLOCK_N)
 
@@ -47,10 +44,10 @@ def _prepare_tiles(dense: Tensor) -> _PreparedTiles:
     )
 
 
-def _compute_scale(dense: Tensor) -> Tensor:
-    """Per-tensor FP8 scale mapping ``max|X|`` to the largest e4m3 value."""
+def _compute_scale(dense: Tensor, storage_dtype: torch.dtype) -> Tensor:
+    """Per-tensor FP8 scale mapping ``max|X|`` to the largest stored value."""
     amax = dense.detach().abs().amax()
-    scale = amax / torch.finfo(torch.float8_e4m3fn).max
+    scale = amax / torch.finfo(storage_dtype).max
     return torch.where(scale == 0, torch.ones_like(scale), scale)
 
 
@@ -78,8 +75,8 @@ def dense_to_tilesparse(
         )
 
     scale = (
-        _compute_scale(dense)
-        if storage_dtype == _FP8_DTYPE and dense.dtype != _FP8_DTYPE
+        _compute_scale(dense, storage_dtype)
+        if is_fp8(storage_dtype) and dense.dtype != storage_dtype
         else None
     )
     prepared = _prepare_tiles(dense)

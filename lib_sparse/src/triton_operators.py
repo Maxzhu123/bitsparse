@@ -9,7 +9,7 @@ from .triton_kernels import (
     _relu_grad_sparse_kernel,
     _relu2_grad_sparse_kernel,
 )
-from ..bitsparse import BitsparseTensor
+from ..bitsparse import BitsparseTensor, is_fp8
 from config import RELU2_SCALE, _PACK_15BIT_CHUNK_TILES
 from .bitpacking import (
     _pack_15bit_kernel,
@@ -43,10 +43,10 @@ def compact_vals(
 ) -> tuple[Tensor, Tensor]:
     """ Compact positive values into standalone or preallocated storage.
         Supports 15-bit packing, FP8 quantization, and preallocated vals buffer. """
-    if storage_dtype == torch.float8_e4m3fn and dense.dtype != torch.float8_e4m3fn:
+    if is_fp8(storage_dtype) and dense.dtype != storage_dtype:
         # Quantize BF16 inputs outside the kernel; the kernel is dtype-agnostic.
         # FP8 inputs are already FP8 and skip the scale.
-        dense = (dense.detach() / scale).to(torch.float8_e4m3fn)
+        dense = (dense.detach() / scale).to(storage_dtype)
     staging_numel = dense.numel()
     standalone = vals is None
     if standalone:
