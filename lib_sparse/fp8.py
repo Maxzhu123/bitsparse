@@ -25,19 +25,19 @@ def is_fp8(dtype) -> bool:
 def _scaled_mm(a: Tensor, b: Tensor, a_scale: Tensor, b_scale: Tensor, output_dtype: torch.dtype) -> Tensor:
     """``F.scaled_mm`` with the operand layout cuBLASLt requires for FP8.
 
-    On Ada (RTX 40-series, cc < 12) cuBLASLt wants A row-major and B
-    column-major; other layouts raise ``CUBLAS_STATUS_NOT_SUPPORTED``.
-    Blackwell (RTX 50-series, cc >= 12) accepts the row-major form directly,
-    so the reformat is skipped there to avoid the extra copies.
+    ``mat_a`` must always be row-major contiguous.  On Ada (RTX 40-series,
+    cc < 12) cuBLASLt additionally wants B column-major; other layouts raise
+    ``CUBLAS_STATUS_NOT_SUPPORTED``.  Blackwell (RTX 50-series, cc >= 12)
+    accepts the row-major B directly, so the reformat is skipped there to
+    avoid the extra copies.
     """
+    # cuBLASLt FP8 wants A row-major contiguous (all architectures).
+    # No allocation if already row-major contiguous.
+    if a.stride(1) != 1:
+        a = a.contiguous()
 
     if _NEEDS_LAYOUT_REFORMAT:
-        # cuBLASLt FP8 wants A row-major.
-        # No allocation if already row-major contiguous.
-        if a.stride(1) != 1:
-            a = a.contiguous()
-
-        # cuBLASLt FP8 wants B column-major.
+        # cuBLASLt FP8 wants B column-major (Ada only).
         # Convert while preserving B's logical [K, N] shape.
         if b.stride(0) != 1:
             b = b.T.contiguous().T
