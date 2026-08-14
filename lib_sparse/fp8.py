@@ -9,10 +9,44 @@ _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
 _FP8_DTYPE = torch.float8_e4m3fn
 _FP8_MAX = torch.finfo(_FP8_DTYPE).max
 
+# Blackwell (cc >= 12) accepts row-major ``mat_b`` directly.  Ada (cc < 12)
+# requires the cuBLASLt layout (A row-major, B column-major) or scaled_mm
+# raises CUBLAS_STATUS_NOT_SUPPORTED.
+_NEEDS_LAYOUT_REFORMAT: bool = (
+    torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] < 12
+)
+
 
 def is_fp8(dtype) -> bool:
     """True for the supported 8-bit float storage dtypes (e4m3fn, e5m2)."""
     return dtype in _FP8_DTYPES
+
+
+def _scaled_mm(a: Tensor, b: Tensor, a_scale: Tensor, b_scale: Tensor, output_dtype: torch.dtype) -> Tensor:
+    """``F.scaled_mm`` with the operand layout cuBLASLt requires for FP8.
+
+    On Ada (RTX 40-series, cc < 12) cuBLASLt wants A row-major and B
+    column-major; other layouts raise ``CUBLAS_STATUS_NOT_SUPPORTED``.
+    Blackwell (RTX 50-series, cc >= 12) accepts the row-major form directly,
+    so the reformat is skipped there to avoid the extra copies.
+    """
+
+    if _NEEDS_LAYOUT_REFORMAT:
+        # cuBLASLt FP8 wants A row-major.
+        # No allocation if already row-major contiguous.
+        if a.stride(1) != 1:
+            a = a.contiguous()
+
+        # cuBLASLt FP8 wants B column-major.
+        # Convert while preserving B's logical [K, N] shape.
+        if b.stride(0) != 1:
+            b = b.T.contiguous().T
+
+    return F.scaled_mm(
+        mat_a=a, mat_b=b,
+        scale_a=a_scale, scale_b=b_scale, output_dtype=output_dtype,
+        scale_recipe_a=F.ScalingType.TensorWise, scale_recipe_b=F.ScalingType.TensorWise,
+    )
 
 
 class MatmulFp8(Function):
@@ -39,10 +73,9 @@ class MatmulFp8(Function):
         if CACHE_FP8_MATMUl:
             ctx.save_for_backward(a_fp8, b_fp8, a_scale, b_scale)
 
-        out = F.scaled_mm(
-            mat_a=a_fp8.contiguous(), mat_b=b_fp8,
-            scale_a=a_scale, scale_b=b_scale, output_dtype=torch.bfloat16,
-            scale_recipe_a=F.ScalingType.TensorWise, scale_recipe_b=F.ScalingType.TensorWise
+        out = _scaled_mm(
+            a_fp8.contiguous(), b_fp8,
+            a_scale, b_scale, output_dtype=torch.bfloat16,
         )
         return out
 
@@ -69,16 +102,14 @@ class MatmulFp8(Function):
         grad_out_fp8, grad_out_scale = to_fp8(grad_output)
         grad_a, grad_b = None, None
         if ctx.needs_input_grad[0]:
-            grad_a = F.scaled_mm(
+            grad_a = _scaled_mm(
                 grad_out_fp8, b_fp8.T,
-                scale_a=grad_out_scale, scale_b=b_scale, output_dtype=a_fp8.dtype,
-                scale_recipe_a=F.ScalingType.TensorWise, scale_recipe_b=F.ScalingType.TensorWise
+                grad_out_scale, b_scale, output_dtype=a_fp8.dtype,
             )
         if ctx.needs_input_grad[1]:
-            grad_b = F.scaled_mm(
+            grad_b = _scaled_mm(
                 a_fp8.T.contiguous(), grad_out_fp8,
-                scale_a=a_scale, scale_b=grad_out_scale, output_dtype=b_fp8.dtype,
-                scale_recipe_a=F.ScalingType.TensorWise, scale_recipe_b=F.ScalingType.TensorWise
+                a_scale, grad_out_scale, output_dtype=b_fp8.dtype,
             )
 
         return grad_a, grad_b, None, None
