@@ -243,22 +243,30 @@ class FFNRelu2_2(Function):
 
     For ``x[B, D]``, ``W1[H, D]``, and ``W2[D, H]`` computes
     ``z = RELU2_SCALE * relu(x @ W1.T)²`` and ``output = z @ W2.T``.  The
-    forward matmuls are quantized to FP8 (fp8 + fp8 -> bf16) while activations
-    stay in BF16, matching the ``lib_sparse.layers`` FFN.
+    forward matmuls are quantized to FP8 (fp8 + fp8 -> bf16) while the ReLU
+    activation is cached as FP8 + scale, matching the ``lib_sparse.layers``
+    FFN.
     """
     @staticmethod
     def forward(ctx, x, W1, W2):
         fp8 = is_fp8(DTYPE)
         z = matmul(x, W1.T, fp8)
         r = z.relu_()
+        # Cache r = relu(preact) as FP8 + scale (halves the saved memory).
+        if fp8:
+            r_fp8, r_scale = to_fp8(r)
+        else:
+            r_fp8, r_scale = r, None
         z = r.square()
         z.mul_(RELU2_SCALE)
-        ctx.save_for_backward(x, W1, W2, r)
+        ctx.save_for_backward(x, W1, W2, r_fp8)
+        ctx.r_scale = r_scale
         return matmul(z, W2.T, fp8)
 
     @staticmethod
     def backward(ctx, grad_output):
-        x, W1, W2, r = ctx.saved_tensors
+        x, W1, W2, r_fp8 = ctx.saved_tensors
+        r_scale = ctx.r_scale
         needs_x = ctx.needs_input_grad[0]
         fp8 = is_fp8(DTYPE)
 
@@ -268,6 +276,11 @@ class FFNRelu2_2(Function):
         else:
             grad_output, scale = grad_output, None
 
+        # Reconstruct k * r² in BF16 (squaring overflows FP8), like AspRelu2B.
+        if fp8:
+            r = r_fp8.to(torch.bfloat16) * r_scale
+        else:
+            r = r_fp8
         z = r.square().mul_(RELU2_SCALE)
         grad_W2 = matmul(grad_output.T, z, fp8, a_scale=scale)
         del z
@@ -310,8 +323,8 @@ class FFN(Function):
 
     For ``x[B, D]``, ``W1[H, D]``, and ``W2[D, H]`` computes
     ``z = relu(x @ W1.T)`` and ``output = z @ W2.T``.  The forward matmuls
-    are quantized to FP8 (fp8 + fp8 -> bf16) while activations stay in BF16,
-    matching the ``lib_sparse.layers`` FFN.
+    are quantized to FP8 (fp8 + fp8 -> bf16) and the ReLU activation is
+    cached as FP8 + scale, matching the ``lib_sparse.layers`` FFN.
     """
     @staticmethod
     def forward(ctx, x, W1, W2, e1=None):
@@ -319,14 +332,21 @@ class FFN(Function):
         fp8 = is_fp8(DTYPE)
         z = matmul(x, W1.T, fp8)
         z.relu_()
+        # Cache the activation as FP8 + scale (halves the saved memory).
+        if fp8:
+            z_fp8, z_scale = to_fp8(z)
+        else:
+            z_fp8, z_scale = z, None
         output = matmul(z, W2.T, fp8)
-        ctx.save_for_backward(x, W1, W2, z)
+        ctx.save_for_backward(x, W1, W2, z_fp8)
+        ctx.z_scale = z_scale
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
         """Compute dense FFN gradients from ``grad_output[B, D]``."""
-        x, W1, W2, z = ctx.saved_tensors
+        x, W1, W2, z_fp8 = ctx.saved_tensors
+        z_scale = ctx.z_scale
         needs_x = ctx.needs_input_grad[0]
         fp8 = is_fp8(DTYPE)
 
@@ -337,12 +357,14 @@ class FFN(Function):
             grad_output, scale = grad_output, None
 
         grad_z = matmul(grad_output, W2, fp8, a_scale=scale)
-        grad_W2 = matmul(grad_output.T, z, fp8, a_scale=scale)
+        grad_W2 = matmul(grad_output.T, z_fp8, fp8, a_scale=scale, b_scale=z_scale)
 
-        grad_preact = torch.ops.aten.threshold_backward.grad_input(
-            grad_z, z, 0, grad_input=grad_z
-        )
-        del z, grad_z
+        # ReLU mask from the dequantized sign (fp8 has no mul / comparison ops).
+        if z_scale is not None:
+            grad_preact = grad_z * ((z_fp8.to(torch.bfloat16) * z_scale) > 0)
+        else:
+            grad_preact = grad_z * (z_fp8 > 0)
+        del z_fp8, grad_z
         if not torch.compiler.is_compiling():
             ctx.maybe_clear_saved_tensors()
 

@@ -5,16 +5,24 @@ from torch.autograd import Function
 import torch.nn.functional as F
 import csv
 
-from experiments.experiment import FFNReluABC, FFN, FFNRelu2ABC
+from experiments.experiment import FFNReluABC, FFNRelu2ABC
+from lib_sparse.fp8 import matmul, to_fp8
+from lib_sparse.config import RELU2_SCALE
 
 algos = ["LZ4", "Zstd", "Cascaded", "Bitcomp"]
 ALGO = None
+
+# Storage precision for the compressed activation state.
+#   True  -> quantize activations to fp8 + scale before nvcomp compression
+#            (half the compressed bytes; fp8 matmuls).
+#   False -> store/compress the raw bf16 activation; bf16 matmuls.
+USE_FP8 = True
 
 class Compressor:
     def __init__(self, algorithm):
         self.algorithm = algorithm
 
-    def compress_tensor(self, x: torch.Tensor):
+    def compress_tensor(self, x: torch.Tensor, scale: Tensor | None = None):
         assert x.is_cuda
         assert x.numel() > 0
 
@@ -53,6 +61,7 @@ class Compressor:
             "dtype": x.dtype,
             "nbytes": raw.numel(),
             "algorithm": self.algorithm,
+            "scale": scale,
         }
 
         return compressed, meta
@@ -76,7 +85,13 @@ class Compressor:
 
         codec.decode(compressed_nv,out=raw_nv,)
 
-        return raw.view(meta["dtype"]).reshape(meta["shape"])
+        x = raw.view(meta["dtype"]).reshape(meta["shape"])
+
+        # Dequantize fp8 back to bf16 (fp8 tensors lack mul/compare ops).
+        if meta["dtype"] == torch.float8_e4m3fn:
+            x = x.to(torch.bfloat16) * meta["scale"]
+
+        return x
 
 
 class ReluLinear(Function):
@@ -87,12 +102,19 @@ class ReluLinear(Function):
         """ relu(Wx) layer. """
         ctx.save_for_backward(W)
         ctx.compressor = compressor
+        fp8 = USE_FP8
 
         h = z.relu_()
-        h_sparse = compressor.compress_tensor(h)
-        # print(h_sparse[0].shape)
+
+        # Quantize to fp8 + scale (compressing fp8 bytes halves the state).
+        if fp8:
+            h_fp8, h_scale = to_fp8(h)
+        else:
+            h_fp8, h_scale = h, None
+
+        h_sparse = compressor.compress_tensor(h_fp8, h_scale)
         ctx.h_sparse = h_sparse
-        y = h @ W.T
+        y = matmul(h, W.T, fp8)
         return y
 
     @staticmethod
@@ -106,11 +128,13 @@ class ReluLinear(Function):
 
         h = compressor.decompress_tensor(compressed, meta)
         del compressed, meta
-        grad_W2 = torch.mm(grad_output.t(), h)
+        fp8 = USE_FP8
+
+        grad_W2 = matmul(grad_output.T, h, fp8)
 
         # Gradients for input
         if needs_z:
-            grad_h = grad_output @ W
+            grad_h = matmul(grad_output, W, fp8)
             grad_z = grad_h * (h > 0)
         else:
             grad_z = None
@@ -131,7 +155,7 @@ class FFNRelu:
         bs_dims = x.shape[:-1]          # [*bs, d_in]
         x = x.reshape(-1, x.shape[-1])  # [batch, d_in]
 
-        z = x @ W1.T
+        z = matmul(x, W1.T, USE_FP8)
         y = ReluLinear.apply(z, W2, compressor)
 
         y = y.reshape(*bs_dims,  y.shape[-1])   # [*bs, d_out]
@@ -146,11 +170,22 @@ class Relu2Linear(Function):
         """ relu(Wx) layer. """
         ctx.compressor = compressor
         ctx.save_for_backward(W)
-        h = z.relu_()
-        h_sparse = compressor.compress_tensor(h)
+        fp8 = USE_FP8
+
+        r = z.relu_()
+
+        # Cache r = relu(preact) as fp8 + scale (compressing fp8 bytes halves
+        # the state; squaring happens on the dequantized bf16 in backward).
+        if fp8:
+            r_fp8, r_scale = to_fp8(r)
+        else:
+            r_fp8, r_scale = r, None
+
+        h_sparse = compressor.compress_tensor(r_fp8, r_scale)
         ctx.h_sparse = h_sparse
-        h.square_()
-        y = h @ W.T
+        r.square_()
+        r.mul_(RELU2_SCALE)
+        y = matmul(r, W.T, fp8)
         return y
 
     @staticmethod
@@ -163,15 +198,17 @@ class Relu2Linear(Function):
         compressed, meta = ctx.h_sparse
         ctx.h_sparse = None
 
-        h = compressor.decompress_tensor(compressed, meta)
+        r = compressor.decompress_tensor(compressed, meta)
         del compressed, meta
+        fp8 = USE_FP8
 
-        grad_W2 = torch.mm(grad_output.t(), h.square())
+        # Reconstruct k * r² in BF16 (squaring overflows FP8), like AspRelu2B.
+        grad_W2 = matmul(grad_output.T, r.square().mul_(RELU2_SCALE), fp8)
 
         # Needs gradient for z
         if needs_z:
-            grad_h = grad_output @ W
-            grad_z = 2 * grad_h * h
+            grad_h = matmul(grad_output, W, fp8)
+            grad_z = 2 * RELU2_SCALE * grad_h * r
         else:
             grad_z = None
 
@@ -193,7 +230,7 @@ class FFNRelu2:
         bs_dims = x.shape[:-1]          # [*bs, d_in]
         x = x.reshape(-1, x.shape[-1])  # [batch, d_in]
 
-        z = x @ W1.T                    # [batch, d_ff]
+        z = matmul(x, W1.T, USE_FP8)    # [batch, d_ff]
         y = Relu2Linear.apply(z, W2, compressor) # [batch, d_out]
 
         y = y.reshape(*bs_dims,  y.shape[-1])   # [*bs, d_out]
@@ -206,7 +243,7 @@ class FFNReluNVCOMP(FFNReluABC):
         super().__init__(dtype, layers, sp_blocks, dim)
         self.compressor = Compressor(ALGO)
 
-    def forward(self, x, pack_sbit, buffer):
+    def forward(self, x, pack_sbit, buffer, storage_dtype=torch.bfloat16):
         """Run the residual FFN stack while allocating sparse storage for this pass."""
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
@@ -221,7 +258,7 @@ class FFNRelu2NVCOMP(FFNRelu2ABC):
         super().__init__(dtype, layers, sp_blocks, dim)
         self.compressor = Compressor(ALGO)
 
-    def forward(self, x, pack_sbit, buffer):
+    def forward(self, x, pack_sbit, buffer, storage_dtype=torch.bfloat16):
         """Run the residual FFN stack while allocating sparse storage for this pass."""
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
@@ -231,7 +268,7 @@ class FFNRelu2NVCOMP(FFNRelu2ABC):
 
 
 if __name__ == "__main__":
-    from experiment import evaluate_nobase
+    from experiments.experiment import evaluate_nobase
 
     with open("./results/relu2_nvcomp_16k.csv", "a", newline="") as f:
         writer = csv.writer(f)
@@ -243,7 +280,7 @@ if __name__ == "__main__":
             ALGO = algo
             print(f"Running with {ALGO}")
             for _ in range(5):
-                vram, time = evaluate_nobase(FFNRelu2NVCOMP, warmup_steps=1, eval_steps=2, bs=16000, sp_blocks=0)
+                vram, time = evaluate_nobase(FFNReluNVCOMP, warmup_steps=1, eval_steps=2, bs=8000, sp_blocks=0)
                 writer.writerow([algo, vram, time])
                 f.flush()
 

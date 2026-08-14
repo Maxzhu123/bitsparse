@@ -229,9 +229,11 @@ def _unpack_batch_kernel(
                             TILE_NUMEL=TILE_NUMEL, TILE_BYTES=TILE_BYTES)
 
     if square_vals:
-        # FP8 promotes to fp32 before squaring; BF16 squares in its own dtype.
+        # FP8 promotes to fp32 before squaring (e4m3 max ≈ 448 overflows on
+        # square); BF16 squares in its own dtype to match the dense baseline.
         if fp8:
-            vals = RELU2_SCALE * vals.to(tl.float32) * vals.to(tl.float32)
+            v = vals.to(tl.float32)
+            vals = RELU2_SCALE * v * v
         else:
             vals = RELU2_SCALE * vals * vals
 
