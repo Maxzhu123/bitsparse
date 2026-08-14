@@ -94,16 +94,6 @@ class FFNRelu:
         return y
 
 
-class FFNRelu_3:
-    """ FFN block with relu activation, 3 linear layers. """
-    @staticmethod
-    def apply(x, W1, W2, W3, sparse_data:TensorBuffer|None=None, pack_sbit: bool=False,
-              storage_dtype: torch.dtype = torch.bfloat16):
-        z1 = matmul(x, W1.T, is_fp8(storage_dtype))
-        y1 = ReluLinear.apply(z1, W2, sparse_data, pack_sbit, storage_dtype)
-        y2 = ReluLinear.apply(y1, W3, sparse_data, pack_sbit, storage_dtype)
-        return y2
-
 # ------------------------------------------------------------
 # ReLU2 layers
 # ------------------------------------------------------------
@@ -185,14 +175,3 @@ class FFNRelu2:
         if b2 is not None:
             y = y + b2
         return y
-
-
-class FFNRelu2_3:
-    @staticmethod
-    def apply(x, W1, W2, W3, sparse_data:TensorBuffer|None=None, pack_sbit: bool=False,
-              storage_dtype: torch.dtype = torch.bfloat16):
-        z1 = matmul(x, W1.T, is_fp8(storage_dtype))
-        y1 = Relu2Linear.apply(z1, W2, sparse_data, pack_sbit, storage_dtype)
-        y2 = Relu2Linear.apply(y1, W3, sparse_data, pack_sbit, storage_dtype)
-        return y2
-

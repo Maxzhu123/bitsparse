@@ -382,7 +382,7 @@ class FFNReluABC(nn.Module):
     def __init__(self, dtype, layers, sp_blocks, hdim):
         super().__init__()
         G = torch.Generator(device="cuda").manual_seed(0)
-        self.W1s, self.W2s, self.W3s = nn.ParameterList(), nn.ParameterList(), nn.ParameterList()
+        self.W1s, self.W2s = nn.ParameterList(), nn.ParameterList()
         for _ in range(layers):
             W1, W2 = gen_params(hdim, G, dtype=dtype)
             self.W1s.append(nn.Parameter(W1))
@@ -407,7 +407,7 @@ class FFNRelu2ABC(nn.Module):
     def __init__(self, dtype, layers, sp_blocks, hdim):
         super().__init__()
         G = torch.Generator(device="cuda").manual_seed(0)
-        self.W1s, self.W2s, self.W3s = nn.ParameterList(), nn.ParameterList(), nn.ParameterList()
+        self.W1s, self.W2s = nn.ParameterList(), nn.ParameterList()
         for _ in range(layers):
             W1, W2 = gen_params(hdim, G, dtype=dtype)
             self.W1s.append(nn.Parameter(W1))
