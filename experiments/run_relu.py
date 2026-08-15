@@ -24,7 +24,6 @@ class FFNReluModel(FFNReluABC):
             if i < self.sp_blocks:
                 x = x + FFNRelu.apply(x_inner, W1, W2, sparse_data=buffer, pack_sbit=pack_sbit,
                                       dtype=storage_dtype)
-                # x = x + FFNSparse.apply(x_inner, W1, W2, buffer)
             else:
                 x = x + FFN.apply(x_inner, W1, W2)
         return x
