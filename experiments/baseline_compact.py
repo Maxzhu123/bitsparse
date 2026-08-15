@@ -277,15 +277,15 @@ def main():
         setup_hooks(model)
         x = torch.randn(bs, 4096, device="cuda", dtype=torch.bfloat16)
 
-        with open(f"./results/relu_compact_{r}.csv", "a", newline="") as f:
+        with open(f"./results/relu2_compact_{r}.csv", "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "method", "vram", "avg_time",
             ])
 
             for _ in range(5):
-                run_test(x, model, 1, relu2=False)
-                time, vram = run_test(x, model, 2, relu2=False)
+                run_test(x, model, 1, relu2=True)
+                time, vram = run_test(x, model, 2, relu2=True)
                 print(f'{time=}, {vram=}')
                 writer.writerow(["compact", vram, time])
                 f.flush()
