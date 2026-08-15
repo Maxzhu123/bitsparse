@@ -13,7 +13,7 @@ from lib_sparse.fp8 import matmul, to_fp8
 #   True  -> quantize the projected activation to fp8 + scale before saving
 #            (half the saved gradient-projection memory; fp8 matmuls).
 #   False -> save the raw bf16 projection; bf16 matmuls.
-USE_FP8 = True
+USE_FP8 = False
 
 
 def setup_hooks(model: nn.Module):
@@ -276,15 +276,15 @@ def main():
         setup_hooks(model)
         x = torch.randn(bs, 4096, device="cuda", dtype=torch.bfloat16)
 
-        with open(f"./results/relu_compact.csv", "a", newline="") as f:
+        with open(f"./results/relu2_compact.csv", "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "method", "vram", "avg_time",
             ])
 
             for _ in range(5):
-                run_test(x, model, 1, relu2=False)
-                time, vram = run_test(x, model, 2, relu2=False)
+                run_test(x, model, 1, relu2=True)
+                time, vram = run_test(x, model, 2, relu2=True)
                 print(f'{time=}, {vram=}')
                 writer.writerow([f"compact_{r}", vram, time])
                 f.flush()

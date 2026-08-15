@@ -12,7 +12,7 @@ from lib_sparse.config import RELU2_SCALE
 algos = ["LZ4", "Zstd", "Cascaded", "Bitcomp"]
 ALGO = None
 
-USE_FP8 = True
+USE_FP8 = False
 
 class Compressor:
     def __init__(self, algorithm):

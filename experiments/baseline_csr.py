@@ -1,3 +1,6 @@
+import os
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+
 import torch
 from torch import Tensor
 from torch.autograd import Function
@@ -136,7 +139,7 @@ class FFNReluCSR(FFNReluABC):
         super().__init__(dtype, layers, sp_blocks, dim)
 
     @torch.compile()
-    def forward(self, x, _, __):
+    def forward(self, x, _, __, ___):
         """Run the residual FFN stack while allocating sparse storage for this pass."""
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
@@ -150,7 +153,7 @@ class FFNRelu2CSR(FFNRelu2ABC):
         """Construct a stack of residual FFN layers for the memory benchmark."""
         super().__init__(dtype, layers, sp_blocks, dim)
 
-    def forward(self, x, _, __):
+    def forward(self, x, _, __, ___):
         """Run the residual FFN stack while allocating sparse storage for this pass."""
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
@@ -160,9 +163,9 @@ class FFNRelu2CSR(FFNRelu2ABC):
 
 
 if __name__ == "__main__":
-    from experiment import evaluate_nobase
+    from experiments.experiment import evaluate_nobase
 
-    with open("./results/relu2_csr_16k.csv", "a", newline="") as f:
+    with open("./results/relu2_csr.csv", "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
             "method", "vram", "avg_time",
@@ -174,4 +177,15 @@ if __name__ == "__main__":
             f.flush()
 
             # exit(7)
+    with open("./results/relu_csr.csv", "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "method", "vram", "avg_time",
+        ])
 
+        for _ in range(5):
+            vram, time = evaluate_nobase(FFNReluCSR, warmup_steps=1, eval_steps=3, bs=16000, sp_blocks=0)
+            writer.writerow(["csr", vram, time])
+            f.flush()
+
+            # exit(7)
