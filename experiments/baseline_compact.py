@@ -265,7 +265,6 @@ def run_test(x, model, steps, relu2):
 
 def main():
     import csv
-    # torch._dynamo.config.allow_unspec_int_on_nn_module = True
 
     bs = 16_000
 
@@ -277,17 +276,17 @@ def main():
         setup_hooks(model)
         x = torch.randn(bs, 4096, device="cuda", dtype=torch.bfloat16)
 
-        with open(f"./results/relu2_compact_{r}.csv", "a", newline="") as f:
+        with open(f"./results/relu_compact.csv", "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "method", "vram", "avg_time",
             ])
 
             for _ in range(5):
-                run_test(x, model, 1, relu2=True)
-                time, vram = run_test(x, model, 2, relu2=True)
+                run_test(x, model, 1, relu2=False)
+                time, vram = run_test(x, model, 2, relu2=False)
                 print(f'{time=}, {vram=}')
-                writer.writerow(["compact", vram, time])
+                writer.writerow([f"compact_{r}", vram, time])
                 f.flush()
 
 

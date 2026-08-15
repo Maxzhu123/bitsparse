@@ -62,13 +62,13 @@ if __name__ == "__main__":
     for _ in range(5):
         run_batch(FFNRelu2Model, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[16_000], save_name="./results/relu2_normal.csv")
 
-    exp.DATA_SPARSITY = "Sparse"
-    for _ in range(5):
-        run_batch(FFNReluModel, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[16_000], save_name="./results/relu_sparse.csv")
-    print(":"*75)
-    print("Running with FFNRelu2")
-    for _ in range(5):
-        run_batch(FFNRelu2Model, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[16_000], save_name="./results/relu2_sparse.csv")
+    # exp.DATA_SPARSITY = "Sparse"
+    # for _ in range(5):
+    #     run_batch(FFNReluModel, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[16_000], save_name="./results/relu_sparse.csv")
+    # print(":"*75)
+    # print("Running with FFNRelu2")
+    # for _ in range(5):
+    #     run_batch(FFNRelu2Model, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[16_000], save_name="./results/relu2_sparse.csv")
 
     # run_layers(FFNReluModel, bs=16_000, save_name="relu2_sparser_layers.csv")
     # evaluate(FFMReluModel, bs=16_000, sp_blocks=0)
