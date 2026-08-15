@@ -100,13 +100,16 @@ class GaussianProjector(nn.Module):
         return R, None
 
     @torch.compiler.disable()
-    def project(self, x):
+    def project(self, x, x_fp8=None, x_scale=None):
         self.seed = random.randint(0, 2**16)
         R, R_scale = self._make_R()
 
         if USE_FP8:
-            # R is already fp8; x is quantized by matmul, output is bf16.
-            return matmul(x, R, True, b_scale=R_scale)
+            # Reuse the pre-quantized fp8 x when provided (avoids re-quantizing
+            # x for the projection matmul); otherwise quantize on the fly.
+            if x_fp8 is None:
+                x_fp8, x_scale = to_fp8(x)
+            return matmul(x_fp8, R, True, a_scale=x_scale, b_scale=R_scale)
         return x @ R
 
     @torch.compiler.disable()
@@ -129,21 +132,23 @@ class _CompActLinear(torch.autograd.Function):
     def forward(ctx, x, weight, projector):
         weight.projector = projector
 
-        # Exact forward pass using the full weight matrix (fp8 matmul).
-        y = matmul(x, weight.T, USE_FP8)
+        if USE_FP8:
+            x_fp8, x_scale = to_fp8(x)
+        else:
+            x_fp8, x_scale = x, None
 
-        # The important part:
+        y = matmul(x_fp8, weight.T, USE_FP8, a_scale=x_scale)
+
         # save compressed x rather than full x.
-        x_small = projector.project(x)
-
+        x_small = projector.project(x, x_fp8=x_fp8, x_scale=x_scale)
         # Quantize the saved projection to fp8 + scale (halves its memory).
         if USE_FP8:
             x_small_fp8, x_small_scale = to_fp8(x_small)
         else:
             x_small_fp8, x_small_scale = x_small, None
-
         ctx.x_small_scale = x_small_scale
         ctx.save_for_backward(x_small_fp8, weight)
+
         return y
 
     @staticmethod
@@ -262,25 +267,28 @@ def main():
     import csv
     # torch._dynamo.config.allow_unspec_int_on_nn_module = True
 
-    bs = 8_000
+    bs = 16_000
 
-    model = FFNCompAct(4096, 6, 2).cuda().to(torch.bfloat16)
-    setup_hooks(model)
-    x = torch.randn(bs, 4096, device="cuda", dtype=torch.bfloat16)
+    ratios = [2, 4, 8]
 
+    for r in ratios:
+        print(f'{"=" * 20} {r=}')
+        model = FFNCompAct(4096, 8, r).cuda().to(torch.bfloat16)
+        setup_hooks(model)
+        x = torch.randn(bs, 4096, device="cuda", dtype=torch.bfloat16)
 
-    with open("./results/relu_compact_16k.csv", "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "method", "vram", "avg_time",
-        ])
+        with open(f"./results/relu_compact_{r}.csv", "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "method", "vram", "avg_time",
+            ])
 
-        for _ in range(5):
-            run_test(x, model, 1, relu2=False)
-            time, vram = run_test(x, model, 3, relu2=False)
-            print(f'{time=}, {vram=}')
-            writer.writerow(["compact", vram, time])
-            f.flush()
+            for _ in range(5):
+                run_test(x, model, 1, relu2=False)
+                time, vram = run_test(x, model, 2, relu2=False)
+                print(f'{time=}, {vram=}')
+                writer.writerow(["compact", vram, time])
+                f.flush()
 
 
 if __name__ == '__main__':

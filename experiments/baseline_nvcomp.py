@@ -12,10 +12,6 @@ from lib_sparse.config import RELU2_SCALE
 algos = ["LZ4", "Zstd", "Cascaded", "Bitcomp"]
 ALGO = None
 
-# Storage precision for the compressed activation state.
-#   True  -> quantize activations to fp8 + scale before nvcomp compression
-#            (half the compressed bytes; fp8 matmuls).
-#   False -> store/compress the raw bf16 activation; bf16 matmuls.
 USE_FP8 = True
 
 class Compressor:
@@ -106,7 +102,7 @@ class ReluLinear(Function):
 
         h = z.relu_()
 
-        # Quantize to fp8 + scale (compressing fp8 bytes halves the state).
+        # Quantize to fp8 + scale once
         if fp8:
             h_fp8, h_scale = to_fp8(h)
         else:
@@ -114,7 +110,7 @@ class ReluLinear(Function):
 
         h_sparse = compressor.compress_tensor(h_fp8, h_scale)
         ctx.h_sparse = h_sparse
-        y = matmul(h, W.T, fp8)
+        y = matmul(h_fp8, W.T, fp8, a_scale=h_scale)
         return y
 
     @staticmethod
@@ -130,11 +126,17 @@ class ReluLinear(Function):
         del compressed, meta
         fp8 = USE_FP8
 
-        grad_W2 = matmul(grad_output.T, h, fp8)
+        # Use fp8 grad_output (quantize once, reuse for both matmuls).
+        if fp8:
+            grad_output, scale = to_fp8(grad_output)
+        else:
+            grad_output, scale = grad_output, None
+
+        grad_W2 = matmul(grad_output.T, h, fp8, a_scale=scale)
 
         # Gradients for input
         if needs_z:
-            grad_h = matmul(grad_output, W, fp8)
+            grad_h = matmul(grad_output, W, fp8, a_scale=scale)
             grad_z = grad_h * (h > 0)
         else:
             grad_z = None
@@ -174,8 +176,7 @@ class Relu2Linear(Function):
 
         r = z.relu_()
 
-        # Cache r = relu(preact) as fp8 + scale (compressing fp8 bytes halves
-        # the state; squaring happens on the dequantized bf16 in backward).
+        # Cache r = relu(preact) as fp8 + scale
         if fp8:
             r_fp8, r_scale = to_fp8(r)
         else:
@@ -202,12 +203,18 @@ class Relu2Linear(Function):
         del compressed, meta
         fp8 = USE_FP8
 
+        # Use fp8 grad_output (quantize once, reuse for both matmuls).
+        if fp8:
+            grad_output, scale = to_fp8(grad_output)
+        else:
+            grad_output, scale = grad_output, None
+
         # Reconstruct k * r² in BF16 (squaring overflows FP8), like AspRelu2B.
-        grad_W2 = matmul(grad_output.T, r.square().mul_(RELU2_SCALE), fp8)
+        grad_W2 = matmul(grad_output.T, r.square().mul_(RELU2_SCALE), fp8, a_scale=scale)
 
         # Needs gradient for z
         if needs_z:
-            grad_h = matmul(grad_output, W, fp8)
+            grad_h = matmul(grad_output, W, fp8, a_scale=scale)
             grad_z = 2 * RELU2_SCALE * grad_h * r
         else:
             grad_z = None
@@ -280,7 +287,7 @@ if __name__ == "__main__":
             ALGO = algo
             print(f"Running with {ALGO}")
             for _ in range(5):
-                vram, time = evaluate_nobase(FFNReluNVCOMP, warmup_steps=1, eval_steps=2, bs=8000, sp_blocks=0)
+                vram, time = evaluate_nobase(FFNRelu2NVCOMP, warmup_steps=1, eval_steps=2, bs=16000, sp_blocks=0)
                 writer.writerow([algo, vram, time])
                 f.flush()
 

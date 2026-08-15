@@ -13,7 +13,7 @@ from lib_sparse.bitsparse import TensorBuffer, bits_per_value
 from lib_sparse.config import RELU2_SCALE
 from lib_sparse.fp8 import is_fp8, matmul, to_fp8
 
-LAYERS = 6
+LAYERS = 8
 BATCH_SIZE = 10000
 DIM = 4096
 
@@ -23,8 +23,8 @@ DTYPE = torch.float8_e4m3fn # torch.bfloat16 #
 # Correctness tolerance: exact for bf16, loose for the fp8 quantization error.
 CHECK_RTOL = CHECK_ATOL = 3e-6 if DTYPE == torch.bfloat16 else 1e-1
 
-BASIC_MODE = False
-DATA_SPARSITY = "Sparse"        # "Normal", "Sparse", "ReLU"
+BASIC_MODE = True
+DATA_SPARSITY = "Normal"        # "Normal", "Sparse", "ReLU"
 c_print(f'{DATA_SPARSITY = }', color="green")
 # ------------------------------------------------------------------------------
 # Evaluation Loop
@@ -81,7 +81,7 @@ def run_batch(model_fn, warmup_steps, eval_steps, batch_sizes=None, sp_blocks=LA
 
         if not file_exists:
             writer.writerow([
-                "batch_size", "vram_base", "vram", "vram_15bit", "vram_ckpt", "avg_time_base", "avg_time_dn", "avg_time", "avg_time_15bit",
+                "batch_size", "vram_base", "vram", "vram_15bit", "vram_ckpt", "avg_time_base", "avg_time_sparse", "avg_time_15", "avg_time_ckpt",
             ])
 
         for bs in batch_sizes:
@@ -90,7 +90,9 @@ def run_batch(model_fn, warmup_steps, eval_steps, batch_sizes=None, sp_blocks=LA
 
             vram_base, avg_time_base, vram_ckpt, avg_time_ckpt, vram, avg_time, vram_15bit, avg_time_15bit = evaluate(
                 model_fn, sp_blocks=sp_blocks, eval_steps=eval_steps, warmup_steps=warmup_steps, bs=bs)
-            writer.writerow([bs, vram_base, vram, vram_15bit, vram_ckpt, avg_time_base, avg_time, avg_time_15bit, avg_time_ckpt])
+            data = [bs, vram_base, vram, vram_15bit, vram_ckpt, avg_time_base, avg_time, avg_time_15bit, avg_time_ckpt]
+            data = [round(x, 2) for x in data]
+            writer.writerow(data)
             f.flush()
 
 
@@ -208,7 +210,6 @@ def evaluate_nobase(model_fn, bs, warmup_steps=1, eval_steps=5, layers=LAYERS, s
     return vram, avg_time
 
 
-
 # ------------------------------------------------------------------------------
 # Generate parameters
 # ------------------------------------------------------------------------------
@@ -238,6 +239,86 @@ def gen_params(dim, G, dtype, expansion=5.25, device="cuda"):
 # ------------------------------------------------------------------------------
 # Baseline FFN layers parameters
 # ------------------------------------------------------------------------------
+class FFN(Function):
+    """Dense baseline autograd FFN for comparison.
+
+    For ``x[B, D]``, ``W1[H, D]``, and ``W2[D, H]`` computes
+    ``z = relu(x @ W1.T)`` and ``output = z @ W2.T``.  The forward matmuls
+    are quantized to FP8 (fp8 + fp8 -> bf16) and the ReLU activation is
+    cached as FP8 + scale, matching the ``lib_sparse.layers`` FFN.
+    """
+
+    @staticmethod
+    def forward(ctx, x, W1, W2, e1=None):
+        """Run the dense FFN forward pass and save tensors for backward."""
+        fp8 = is_fp8(DTYPE)
+        z = matmul(x, W1.T, fp8)
+        z.relu_()
+        # Cache the activation as FP8 + scale (halves the saved memory).
+        if fp8:
+            z, z_scale = to_fp8(z)
+        else:
+            z, z_scale = z, None
+        output = matmul(z, W2.T, fp8, a_scale=z_scale)
+        ctx.save_for_backward(x, W1, W2, z)
+        ctx.z_scale = z_scale
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Compute dense FFN gradients from ``grad_output[B, D]``."""
+        x, W1, W2, z = ctx.saved_tensors
+        z_scale = ctx.z_scale
+        needs_x = ctx.needs_input_grad[0]
+        fp8 = is_fp8(DTYPE)
+
+        # Use fp8 grad_output
+        if fp8:
+            grad_output, scale = to_fp8(grad_output)
+        else:
+            grad_output, scale = grad_output, None
+
+        grad_z = matmul(grad_output, W2, fp8, a_scale=scale)
+        grad_W2 = matmul(grad_output.T, z, fp8, a_scale=scale, b_scale=z_scale)
+
+        # ReLU mask from the dequantized sign (fp8 has no mul / comparison ops).
+        if z_scale is not None:
+            grad_preact = grad_z * (z.to(torch.bfloat16) > 0)
+        else:
+            grad_preact = torch.ops.aten.threshold_backward.grad_input(
+                grad_z, z, 0, grad_input=grad_z
+            )
+        del z, grad_z
+        if not torch.compiler.is_compiling():
+            ctx.maybe_clear_saved_tensors()
+
+        # Use fp8 grad_preact
+        if fp8:
+            grad_preact, scale = to_fp8(grad_preact)
+        else:
+            grad_preact, scale = grad_preact, None
+
+        if needs_x:
+            grad_x = matmul(grad_preact, W1, fp8, a_scale=scale)
+        else:
+            grad_x = None
+        grad_W1 = matmul(grad_preact.T, x, fp8, a_scale=scale)
+        return grad_x, grad_W1, grad_W2, None, None
+
+    @staticmethod
+    def apply_ckpt(x, W1, W2):
+        return torch.utils.checkpoint.checkpoint(FFN.forward_ckpt, x, W1, W2, use_reentrant=False)
+
+    @staticmethod
+    def forward_ckpt(x, W1, W2):
+        """Run the dense FFN forward pass and save tensors for backward."""
+        fp8 = is_fp8(DTYPE)
+        z = matmul(x, W1.T, fp8)
+        z.relu_()
+        output = matmul(z, W2.T, fp8)
+        return output
+
+
 class FFNRelu2_2(Function):
     """Dense baseline autograd FFN with ReLU² activation for comparison.
 
@@ -265,7 +346,7 @@ class FFNRelu2_2(Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        x, W1, W2, r_fp8 = ctx.saved_tensors
+        x, W1, W2, r = ctx.saved_tensors
         r_scale = ctx.r_scale
         needs_x = ctx.needs_input_grad[0]
         fp8 = is_fp8(DTYPE)
@@ -278,9 +359,8 @@ class FFNRelu2_2(Function):
 
         # Reconstruct k * r² in BF16 (squaring overflows FP8), like AspRelu2B.
         if fp8:
-            r = r_fp8.to(torch.bfloat16) * r_scale
-        else:
-            r = r_fp8
+            r = r.to(torch.bfloat16) * r_scale
+
         z = r.square().mul_(RELU2_SCALE)
         grad_W2 = matmul(grad_output.T, z, fp8, a_scale=scale)
         del z
@@ -316,83 +396,6 @@ class FFNRelu2_2(Function):
         z = r.square()
         z.mul_(RELU2_SCALE)
         return matmul(z, W2.T, fp8)
-
-
-class FFN(Function):
-    """Dense baseline autograd FFN for comparison.
-
-    For ``x[B, D]``, ``W1[H, D]``, and ``W2[D, H]`` computes
-    ``z = relu(x @ W1.T)`` and ``output = z @ W2.T``.  The forward matmuls
-    are quantized to FP8 (fp8 + fp8 -> bf16) and the ReLU activation is
-    cached as FP8 + scale, matching the ``lib_sparse.layers`` FFN.
-    """
-    @staticmethod
-    def forward(ctx, x, W1, W2, e1=None):
-        """Run the dense FFN forward pass and save tensors for backward."""
-        fp8 = is_fp8(DTYPE)
-        z = matmul(x, W1.T, fp8)
-        z.relu_()
-        # Cache the activation as FP8 + scale (halves the saved memory).
-        if fp8:
-            z_fp8, z_scale = to_fp8(z)
-        else:
-            z_fp8, z_scale = z, None
-        output = matmul(z, W2.T, fp8)
-        ctx.save_for_backward(x, W1, W2, z_fp8)
-        ctx.z_scale = z_scale
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        """Compute dense FFN gradients from ``grad_output[B, D]``."""
-        x, W1, W2, z_fp8 = ctx.saved_tensors
-        z_scale = ctx.z_scale
-        needs_x = ctx.needs_input_grad[0]
-        fp8 = is_fp8(DTYPE)
-
-        # Use fp8 grad_output
-        if fp8:
-            grad_output, scale = to_fp8(grad_output)
-        else:
-            grad_output, scale = grad_output, None
-
-        grad_z = matmul(grad_output, W2, fp8, a_scale=scale)
-        grad_W2 = matmul(grad_output.T, z_fp8, fp8, a_scale=scale, b_scale=z_scale)
-
-        # ReLU mask from the dequantized sign (fp8 has no mul / comparison ops).
-        if z_scale is not None:
-            grad_preact = grad_z * ((z_fp8.to(torch.bfloat16) * z_scale) > 0)
-        else:
-            grad_preact = grad_z * (z_fp8 > 0)
-        del z_fp8, grad_z
-        if not torch.compiler.is_compiling():
-            ctx.maybe_clear_saved_tensors()
-
-        # Use fp8 grad_preact
-        if fp8:
-            grad_preact, scale = to_fp8(grad_preact)
-        else:
-            grad_preact, scale = grad_preact, None
-            
-        if needs_x:
-            grad_x = matmul(grad_preact, W1, fp8, a_scale=scale)
-        else:
-            grad_x = None
-        grad_W1 = matmul(grad_preact.T, x, fp8, a_scale=scale)
-        return grad_x, grad_W1, grad_W2, None, None
-
-    @staticmethod
-    def apply_ckpt(x, W1, W2):
-        return torch.utils.checkpoint.checkpoint(FFN.forward_ckpt, x, W1, W2, use_reentrant=False)
-
-    @staticmethod
-    def forward_ckpt(x, W1, W2):
-        """Run the dense FFN forward pass and save tensors for backward."""
-        fp8 = is_fp8(DTYPE)
-        z = matmul(x, W1.T, fp8)
-        z.relu_()
-        output = matmul(z, W2.T, fp8)
-        return output
 
 
 # ------------------------------------------------------------------------------
