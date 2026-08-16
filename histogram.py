@@ -2,6 +2,10 @@ import torch
 from typing import Sequence
 from matplotlib import pyplot as plt
 
+
+MAX_CHUNK_ELEMENTS = 16 * 1024 * 1024
+
+
 @torch.no_grad()
 def tensor_histogram(
     tensors: Sequence[torch.Tensor],
@@ -32,13 +36,13 @@ def tensor_histogram(
     minimum = None
     maximum = None
 
-    for x in tensors:
-        x = x.detach().reshape(-1)
-        if x.numel() == 0:
+    for tensor in tensors:
+        tensor = tensor.detach().reshape(-1)
+        if tensor.numel() == 0:
             continue
 
-        tensor_minimum = x.amin()
-        tensor_maximum = x.amax()
+        tensor_minimum = tensor.amin()
+        tensor_maximum = tensor.amax()
         minimum = (
             tensor_minimum
             if minimum is None
@@ -50,20 +54,29 @@ def tensor_histogram(
             else torch.maximum(maximum, tensor_maximum)
         )
 
-        # Normal buckets:
-        # [-10.0, -9.9) -> 1
-        # [-9.9,  -9.8) -> 2
-        # ...
-        idx = torch.floor((x + limit) / bin_width).to(torch.int64) + 1
+        # Keep the temporary int64 bucket indices bounded for very large model
+        # tensors (for example Nemotron's embedding and output matrices).
+        for start in range(0, tensor.numel(), MAX_CHUNK_ELEMENTS):
+            x = tensor[start : start + MAX_CHUNK_ELEMENTS]
+            # Histogram arithmetic needs more precision than model activations.
+            # In BF16, adding a large limit (for example 150) can quantize away
+            # bin widths smaller than one before the division is performed.
+            bucket_values = x.to(torch.float32)
 
-        # Overflow buckets
-        idx = torch.where(x < -limit, 0, idx)
-        idx = torch.where(x >  limit, n_bins + 1, idx)
+            # Normal buckets:
+            # [-10.0, -9.9) -> 1
+            # [-9.9,  -9.8) -> 2
+            # ...
+            idx = torch.floor((bucket_values + limit) / bin_width).to(torch.int64) + 1
 
-        # x == +limit goes into the final regular bucket
-        idx.clamp_(0, n_bins + 1)
+            # Overflow buckets
+            idx = torch.where(bucket_values < -limit, 0, idx)
+            idx = torch.where(bucket_values > limit, n_bins + 1, idx)
 
-        counts += torch.bincount(idx, minlength=n_bins + 2)
+            # x == +limit goes into the final regular bucket
+            idx.clamp_(0, n_bins + 1)
+
+            counts += torch.bincount(idx, minlength=n_bins + 2)
 
     edges = torch.linspace(
         -limit, limit, n_bins + 1,
