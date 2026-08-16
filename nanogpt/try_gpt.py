@@ -138,7 +138,7 @@ def evaluate_checkpoint(
 
 
 def main() -> None:
-    checkpoint = Path("/home/bubbles/Documents/bitsparse/nanogpt/logs/2026-07-04_00-06-23/3300.pt")
+    checkpoint = Path("~/Documents/bitsparse/nanogpt/logs/2026-07-04_00-06-23/3300.pt").expanduser()
     print(f"data: {DATA_ROOT / DATA_PATTERN}")
     RESULTS_PATH = LOG_DIR / "normal.csv"
     results_file_exists = RESULTS_PATH.exists()
