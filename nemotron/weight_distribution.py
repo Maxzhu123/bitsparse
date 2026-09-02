@@ -1,5 +1,4 @@
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import torch
@@ -10,54 +9,83 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from histogram import plot_histogram, tensor_histogram
-from nemotron.llm import NemotronHForCausalLM
+from histogram import tensor_histogram
+from nemotron.llm import (
+    NemotronHForCausalLM,
+    NemotronHMamba2Mixer,
+    NemotronHRMSNorm,
+)
 
 
 MODEL_NAME = "nvidia/Nemotron-H-8B-Base-8K"
-BIN_WIDTH = 0.5
+RESULTS_PATH = Path(__file__).parent / "weight_distribution_results.pt"
+RESULTS_FORMAT_VERSION = 2
+BIN_WIDTH = 0.01
 LIMIT = 50.0
 
 
 def group_parameters(model: nn.Module) -> dict[str, list[Tensor]]:
-    """Group matrix/kernel multiplication parameters independently of module type."""
-    groups: defaultdict[str, list[Tensor]] = defaultdict(list)
+    """Group parameters by the Nemotron component that owns them."""
+    groups: dict[str, list[Tensor]] = {}
     seen: set[int] = set()
-    embedding_parameter_ids = {
-        id(parameter)
-        for module in model.modules()
-        if isinstance(module, nn.Embedding)
-        for parameter in module.parameters(recurse=False)
-    }
-    linear_module_weight_ids = {
-        id(module.weight)
-        for module in model.modules()
-        if isinstance(module, nn.Linear) and module.weight is not None
-    }
-    multiplication_weight_ids = linear_module_weight_ids | {
-        id(parameter)
-        for parameter in model.parameters()
-        if parameter.ndim >= 2 and id(parameter) not in embedding_parameter_ids
-    }
 
-    for module in model.modules():
+    def add(label: str, parameter: Tensor) -> None:
+        if id(parameter) in seen:
+            return
+        seen.add(id(parameter))
+        groups.setdefault(label, []).append(parameter)
+
+    for module_name, module in model.named_modules():
+        suffix = module_name.rsplit(".", 1)[-1]
         for name, parameter in module.named_parameters(recurse=False):
-            if id(parameter) in seen:
-                continue
-            seen.add(id(parameter))
-            if id(parameter) in multiplication_weight_ids:
-                label = "Linear weights"
+            if isinstance(module, nn.Embedding):
+                label = "Embedding weights"
+            elif isinstance(module, nn.Linear):
+                if module_name == "lm_head":
+                    label = "LM head weights"
+                elif name == "bias":
+                    label = "Biases"
+                else:
+                    label = {
+                        "up_proj": "FFN input weights",
+                        "down_proj": "FFN output weights",
+                        "q_proj": "Attention query weights",
+                        "k_proj": "Attention key weights",
+                        "v_proj": "Attention value weights",
+                        "o_proj": "Attention output weights",
+                        "in_proj": "Mamba input weights",
+                        "out_proj": "Mamba output weights",
+                    }.get(suffix, "Other")
+            elif isinstance(module, NemotronHMamba2Mixer):
+                label = "Mamba state parameters"
+            elif module_name.endswith(".mixer.conv1d"):
+                label = "Mamba convolution weights"
+            elif isinstance(module, NemotronHRMSNorm) or "RMSNorm" in type(module).__name__:
+                label = "Norm weights"
             elif name == "bias":
                 label = "Biases"
             else:
                 label = "Other"
-            groups[label].append(parameter)
+            add(label, parameter)
 
-    return {
-        label: groups[label]
-        for label in ("Linear weights", "Biases", "Other")
-        if groups[label]
-    }
+    label_order = (
+        "Embedding weights",
+        "FFN input weights",
+        "FFN output weights",
+        "Attention query weights",
+        "Attention key weights",
+        "Attention value weights",
+        "Attention output weights",
+        "Mamba input weights",
+        "Mamba output weights",
+        "Mamba convolution weights",
+        "LM head weights",
+        "Norm weights",
+        "Mamba state parameters",
+        "Biases",
+        "Other",
+    )
+    return {label: groups[label] for label in label_order if label in groups}
 
 
 @torch.no_grad()
@@ -90,6 +118,37 @@ def weight_distribution(
     return histograms, edges, extrema
 
 
+def save_weight_results(
+    path: Path,
+    histograms: dict[str, Tensor],
+    edges: Tensor,
+    extrema: dict[str, tuple[Tensor, Tensor]],
+    *,
+    model_name: str,
+    bin_width: float,
+    limit: float,
+) -> None:
+    """Save weight histograms, extrema, and run metadata as CPU tensors."""
+    result = {
+        "format_version": RESULTS_FORMAT_VERSION,
+        "model_name": model_name,
+        "bin_width": bin_width,
+        "limit": limit,
+        "categories": list(histograms),
+        "histograms": {
+            label: counts.detach().cpu()
+            for label, counts in histograms.items()
+        },
+        "edges": edges.detach().cpu(),
+        "extrema": {
+            label: (minimum.detach().cpu(), maximum.detach().cpu())
+            for label, (minimum, maximum) in extrema.items()
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(result, path)
+
+
 def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
@@ -101,12 +160,16 @@ def main() -> None:
     histograms, edges, extrema = weight_distribution(model)
     for label, (minimum, maximum) in extrema.items():
         print(f"{label}: min={minimum.item():.6g}, max={maximum.item():.6g}")
-    plot_histogram(
+    save_weight_results(
+        RESULTS_PATH,
         histograms,
         edges,
-        log_y=True,
-        title="Nemotron checkpoint tensor distributions",
+        extrema,
+        model_name=MODEL_NAME,
+        bin_width=BIN_WIDTH,
+        limit=LIMIT,
     )
+    print(f"Saved weight results to {RESULTS_PATH}")
 
 
 if __name__ == "__main__":
