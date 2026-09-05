@@ -356,7 +356,9 @@ class NemotronHMamba2Mixer(nn.Module):
                     causal_conv1d_update,
                 )
             )
+            assert is_fast_path_available, "One of the required kernels is not available. Please check your installation."
         else:
+            assert False, "Cannot find efficient implementations"
             causal_conv1d_update = None
             causal_conv1d_fn = None
             selective_state_update = None
