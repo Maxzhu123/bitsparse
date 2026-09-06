@@ -1,0 +1,243 @@
+% Standalone methodology section for inclusion in a larger LaTeX paper.
+% Requires: \usepackage{amsmath,amssymb}
+
+\section{Methodology}
+\label{sec:methodology}
+
+\subsection{Overview}
+
+We propose \emph{BitSparse}, a GPU-resident activation-compression method for
+feed-forward networks using ReLU or squared ReLU (ReLU$^2$) nonlinearities.
+The method exploits the fact that ReLU activations are non-negative and often
+contain many zeros.  Rather than retaining a full dense activation for the
+backward pass, BitSparse stores a tile-wise support mask, a compact stream of
+positive values, and a per-tile prefix index.  The representation preserves
+the positions of active values while avoiding per-value coordinate indices.
+
+BitSparse is designed primarily to reduce the memory required to save
+activations during training.  It is not a sparse-GEMM method in its current
+form: the forward feed-forward projection is computed densely, and the
+sparse operand is reconstructed into a dense temporary before the
+weight-gradient matrix multiplication.  The method therefore trades
+compression and reconstruction work for reduced persistent activation memory.
+
+\subsection{Tile-wise sparse activation format}
+\label{sec:method-tile-format}
+
+Let $X \in \mathbb{R}^{M \times N}$ denote a preactivation and let
+$H = \operatorname{ReLU}(X)$.  BitSparse partitions $H$ into a regular grid
+of tiles of size $B_M \times B_N$, where the implementation uses
+$B_M=B_N=64$.  The number of tile rows and columns is
+\begin{equation}
+    G_M = \left\lceil \frac{M}{B_M} \right\rceil,
+    \qquad
+    G_N = \left\lceil \frac{N}{B_N} \right\rceil.
+\end{equation}
+Tiles are ordered in row-major grid order, such that the identifier of tile
+$(u,v)$ is $t=uG_N+v$.  Boundary tiles are logically padded with zeros;
+therefore, every tile has $B_MB_N=4096$ positions irrespective of its
+location.
+
+For each position $q$ in tile $t$, we form a binary support indicator
+\begin{equation}
+    m_t(q) = \mathbb{I}[H_t(q)>0].
+\end{equation}
+The representation of $H$ consists of the following arrays:
+\begin{enumerate}
+    \item a packed bitmask array $\mathbf{m}$, containing one bit per
+    logical activation position;
+    \item a compact value array $\mathbf{v}$, containing only positive
+    activation values in tile-major and row-major-within-tile order; and
+    \item a 32-bit prefix array $\mathbf{p}$ of length $G_MG_N+1$.
+\end{enumerate}
+The prefix array is defined by
+\begin{equation}
+    p_0=0,
+    \qquad
+    p_{t+1}=p_t+\sum_{q=0}^{B_MB_N-1}m_t(q).
+    \label{eq:prefix}
+\end{equation}
+Thus, $p_t$ is the starting logical offset of tile $t$ in the compact value
+stream.  The rank of an active local position is
+\begin{equation}
+    r_t(q)=\sum_{j=0}^{q-1}m_t(j),
+\end{equation}
+and its stored value is
+\begin{equation}
+    v_{p_t+r_t(q)} = H_t(q)
+    \qquad \text{when } m_t(q)=1.
+    \label{eq:value-address}
+\end{equation}
+Equations~\eqref{eq:prefix} and~\eqref{eq:value-address} permit direct
+addressing within a tile without storing an explicit row and column index for
+each nonzero.
+
+The bitmask is stored as unsigned bytes.  If $f$ is the flattened position in
+a tile, its indicator is held in bit $f \bmod 8$ of byte
+$\lfloor f/8 \rfloor$.  Consequently, each $64\times64$ tile requires
+512 bytes of mask metadata.  The full sparse object additionally records the
+logical shape, tile geometry, stored dtype, optional FP8 scale, and an offset
+into a shared value buffer when one is used.
+
+\subsection{GPU compression and reconstruction}
+\label{sec:method-kernels}
+
+Compression is performed entirely on the GPU in three stages.  First, a
+Triton tile kernel loads one tile, evaluates $H_t>0$, packs groups of eight
+Boolean values into mask bytes, and reduces the same mask to a nonzero count.
+Second, an inclusive scan over the per-tile counts constructs the prefix
+array.  The implementation initializes the first prefix element on the
+device and writes the scan through a signed 32-bit view of the unsigned
+prefix storage; this avoids a synchronizing scalar assignment from the host.
+Third, a second Triton kernel expands each tile mask, computes
+$r_t(q)$ using a tile-local prefix scan, and scatters active values into the
+compact stream according to Equation~\eqref{eq:value-address}.
+
+To reconstruct a tile, the inverse kernel expands the packed mask, recomputes
+the local ranks, gathers the corresponding compact values, and stores zeros
+at inactive positions.  The same kernel supports a batched reconstruction of
+contiguous tile rows.  This enables a memory-limited alternative in which
+only a row-aligned slice of a sparse matrix is reconstructed at one time.
+
+\subsection{Sign-bit packing}
+\label{sec:method-packing}
+
+Because stored ReLU values are non-negative, their sign bit is always zero.
+BitSparse can therefore remove this redundant bit and concatenate the
+remaining bits into a continuous stream.  BF16 values occupy 15 bits rather
+than 16 bits, while FP8 values occupy 7 bits rather than 8 bits.  This
+operation is bit-exact with respect to the already selected BF16 or FP8
+storage format; it is distinct from numerical quantization.
+
+Let $b$ denote the number of stored bits per value ($b=15$ for BF16 and
+$b=7$ for FP8).  The bit position of compact value $i$ is $ib$.  During
+decoding, the implementation reads two adjacent 16-bit words and computes
+\begin{equation}
+    w = \left\lfloor \frac{ib}{16} \right\rfloor,
+    \qquad
+    s = ib \bmod 16,
+    \qquad
+    \hat{v}_i =
+    \left((W_w \mathbin{|} (W_{w+1} \ll 16)) \gg s\right)
+    \mathbin{\&} (2^b-1),
+\end{equation}
+followed by a bit reinterpretation into the appropriate BF16 or FP8 type.
+Two-word reads handle values that cross word boundaries.  Standalone packed
+arrays include a guard word, while value streams shared across layers align
+each activation to eight logical values.  This alignment makes every
+independent packed stream byte-aligned and prevents neighboring pack kernels
+from updating the same output byte.
+
+\subsection{FP8 activation storage and matrix multiplication}
+\label{sec:method-fp8}
+
+BitSparse supports BF16 and FP8 activation storage.  For FP8 conversion, a
+single tensor-wise scale is computed as
+\begin{equation}
+    s = \max\left(
+        \frac{\max_{i,j}|H_{ij}|}{q_{\max}},
+        10^{-9}
+    \right),
+    \qquad
+    H_{\mathrm{FP8}} =
+    \operatorname{cast}_{\mathrm{FP8}}\left(\frac{H}{s}\right),
+    \label{eq:fp8-scale}
+\end{equation}
+where $q_{\max}$ is the largest finite value of the selected FP8 format.
+The implementation currently converts tensors to E4M3FN FP8.  The scale is
+stored as sparse metadata and is applied by the matrix multiplication or
+ReLU$^2$ reconstruction path as appropriate.
+
+Dense FP8 products use PyTorch's scaled matrix multiplication primitive with
+tensor-wise scales.  The implementation ensures that the left operand is
+row-major contiguous and applies an architecture-dependent layout conversion
+to the right operand when required by cuBLASLt.  Specifically, the right
+operand is reformatted to a column-major-compatible layout on Ada-class
+devices, while this copy is skipped on Blackwell-class devices that accept
+the row-major layout directly.  FP8 matrix multiplication returns BF16
+outputs.
+
+\subsection{Sparse activation checkpointing for feed-forward layers}
+\label{sec:method-ffn}
+
+We integrate the representation into two custom PyTorch autograd functions.
+For an input $Z$, first-layer weight
+$W_1 \in \mathbb{R}^{d_{\mathrm{ff}}\times d_{\mathrm{in}}}$, and
+second-layer weight
+$W_2 \in \mathbb{R}^{d_{\mathrm{out}}\times d_{\mathrm{ff}}}$, the
+ReLU feed-forward block computes
+\begin{align}
+    A &= ZW_1^\top + b_1, \\
+    H &= \operatorname{ReLU}(A), \\
+    Y &= HW_2^\top + b_2.
+\end{align}
+The dense $H$ is used by the forward projection, but its BitSparse
+representation is saved for backward in place of a full dense saved
+activation.
+
+For the ReLU$^2$ variant, the saved sparse tensor still represents
+$H=\operatorname{ReLU}(A)$, whereas the projected activation is
+\begin{equation}
+    Y = \left(\kappa H^2\right) W_2^\top + b_2,
+    \label{eq:relu2-forward}
+\end{equation}
+where $\kappa$ is \texttt{RELU2\_SCALE} (equal to one in the current
+implementation).  In the FP8 ReLU$^2$ path, the compressed activation is an
+FP8 copy used for backward, while the forward square is formed from the
+original dense ReLU activation before the output matmul.  Consequently, FP8
+backward computations use a quantized approximation of $H$, whereas sign-bit
+packing introduces no additional numerical approximation.
+
+Let $G=\partial \mathcal{L}/\partial Y$ denote the upstream gradient.  For
+the ReLU block, the second-layer weight gradient is
+\begin{equation}
+    \frac{\partial \mathcal{L}}{\partial W_2}
+    = G^\top H.
+\end{equation}
+The implementation reconstructs $H$ from its BitSparse form and then
+performs this dense or scaled-FP8 product.  The preactivation gradient is
+computed as
+\begin{equation}
+    \frac{\partial \mathcal{L}}{\partial A}
+    = (GW_2) \odot \mathbb{I}[H>0].
+    \label{eq:relu-backward}
+\end{equation}
+Rather than reconstructing $H$ to apply the indicator in
+Equation~\eqref{eq:relu-backward}, a Triton kernel expands the stored
+bitmask and overwrites inactive gradient entries with zero.
+
+For the ReLU$^2$ block, the corresponding gradients are
+\begin{align}
+    \frac{\partial \mathcal{L}}{\partial W_2}
+    &= G^\top (\kappa H^2), \\
+    \frac{\partial \mathcal{L}}{\partial A}
+    &= (GW_2) \odot 2\kappa H \odot \mathbb{I}[H>0].
+    \label{eq:relu2-backward}
+\end{align}
+The second-layer weight gradient reconstructs $\kappa H^2$ in BF16, which
+avoids overflow from squaring FP8 values.  For the second expression in
+Equation~\eqref{eq:relu2-backward}, a fused Triton kernel reads the compact
+values directly, applies $2\kappa H$ at active positions, and writes zero
+at inactive positions.  Gradients with respect to $W_1$ and $Z$ are then
+computed by PyTorch from the returned preactivation gradient.
+
+\subsection{Shared value buffers and implementation details}
+\label{sec:method-buffer}
+
+When processing multiple feed-forward layers, separate compact value arrays
+would create substantial allocation overhead.  BitSparse optionally appends
+the value streams of multiple activations to a preallocated
+\texttt{TensorBuffer}.  The buffer holds a device-resident logical offset;
+each sparse tensor records a copy of its starting offset, and compression
+advances the shared offset by its active-value count.  Packed streams are
+rounded up to the next eight-value boundary.  The buffer is reset only after
+all forward activations using it have completed backward, since resetting it
+earlier would overwrite activations referenced by the autograd graph.
+
+All tile packing, compaction, unpacking, and gradient masking kernels are
+implemented in Triton.  Kernel configurations are autotuned over small sets
+of warp counts and pipeline stages.  The unpack and gradient kernels operate
+on one tile per program, whereas the packing kernel is tuned over block size,
+warp count, and storage codec.  The implementation uses in-place operations
+for ReLU, ReLU$^2$ scaling, and gradient masking where safe, further reducing
+temporary allocation pressure.
