@@ -75,36 +75,56 @@ def _pack_kernel(
 
     logical_start = tl.load(output_offset_ptr).to(tl.int64) + prefix_start
     start_bit = logical_start * bits
-    end_bit = start_bit + numel * bits
     first_byte = start_bit // 8
-    end_byte = (end_bit + 7) // 8
+    start_shift = (start_bit % 8).to(tl.int32)
+    total_bits = numel * bits
+    num_bytes = (start_shift + total_bits + 7) // 8
 
-    byte_offsets = (tl.program_id(0).to(tl.int64) * BLOCK_SIZE
-                    + tl.arange(0, BLOCK_SIZE).to(tl.int64))
-    output_mask = byte_offsets < (end_byte - first_byte)
+    byte_offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    output_mask = byte_offsets < num_bytes
     output_bytes = first_byte + byte_offsets
 
-    relative_bit = output_bytes * 8 - start_bit
-    source_bit = tl.maximum(relative_bit, 0)
-    input_indices = source_bit // bits
-    bit_offsets = source_bit % bits
+    # Every ``bits`` output bytes consume exactly eight values.  Computing the
+    # source position within that repeating group keeps the lane-wise math in
+    # 32 bits; only the absolute output address needs the 64-bit stream offset.
+    bit_in_group = (byte_offsets % bits) * 8 - start_shift
+    previous_value = bit_in_group < 0
+    input_indices = (
+        (byte_offsets // bits) * 8
+        + tl.where(previous_value, -1, bit_in_group // bits)
+    )
+    bit_offsets = tl.where(
+        previous_value, bit_in_group + bits, bit_in_group % bits
+    )
+
+    # The first byte can begin partway through a destination byte, but its
+    # source still starts at input value zero.
+    first = byte_offsets == 0
+    input_indices = tl.where(first, 0, input_indices)
+    bit_offsets = tl.where(first, 0, bit_offsets)
 
     value0 = tl.load(
         input_ptr + input_indices,
         mask=output_mask & (input_indices < numel),
         other=0,
     ).to(tl.uint32)
+    value1_mask = output_mask & ((input_indices + 1) < numel)
+    if CODEC == 0:
+        # A BF16 byte only straddles values when fewer than eight bits remain.
+        value1_mask &= bit_offsets > bits - 8
     value1 = tl.load(
         input_ptr + input_indices + 1,
-        mask=output_mask & ((input_indices + 1) < numel),
+        mask=value1_mask,
         other=0,
     ).to(tl.uint32)
     packed = (value0 >> bit_offsets) | (value1 << (bits - bit_offsets))
-    packed = (packed << tl.maximum(-relative_bit, 0)) & 0xFF
+    packed = (packed << tl.where(first, start_shift, 0)) & 0xFF
 
-    byte_start_bit = output_bytes * 8
-    valid_lo = tl.minimum(tl.maximum(start_bit - byte_start_bit, 0), 8)
-    valid_hi = tl.minimum(tl.maximum(end_bit - byte_start_bit, 0), 8)
+    end_shift = ((start_shift + total_bits) % 8).to(tl.int32)
+    valid_lo = tl.where(first, start_shift, 0)
+    valid_hi = tl.where(
+        (byte_offsets == num_bytes - 1) & (end_shift != 0), end_shift, 8
+    )
     valid_bits = ((1 << valid_hi) - 1) & ~((1 << valid_lo) - 1)
 
     boundary = valid_bits != 0xFF
