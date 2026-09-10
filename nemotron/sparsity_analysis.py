@@ -53,8 +53,8 @@ USE_KERNELS = False
 
 # Measurement config: each batch contains BATCH_SIZE sequences of SEQ_LEN tokens.
 BATCH_SIZE = 1
-SEQ_LEN = 4096
-NUM_BATCHES = 64
+SEQ_LEN = 8000
+NUM_BATCHES = 256
 # Warmup batches are excluded from NUM_BATCHES and the reported statistics.
 WARMUP_STEPS = 1
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
