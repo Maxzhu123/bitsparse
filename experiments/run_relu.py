@@ -50,10 +50,12 @@ class FFNRelu2Model(FFNRelu2ABC):
 
 
 if __name__ == "__main__":
+    from cprint import c_print
     from experiments.experiment import run_batch, run_layers
     import experiments.experiment as exp
 
-    exp.DATA_SPARSITY = "Normal"
+    exp.DATA_SPARSITY = "Sparse"
+    c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
     for _ in range(5):
         run_batch(FFNReluModel, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[16_000], save_name="./results/relu_normal.csv")
     print(":"*75)
