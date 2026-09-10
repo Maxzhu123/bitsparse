@@ -1,19 +1,17 @@
-import os
 import time
 
 import torch
 from torch import Tensor
 
-from lib_sparse.bitsparse import BitsparseTensor
+from lib_sparse.bitsparse import BitsparseTensor, TensorBuffer, bits_per_value
 from lib_sparse.src.functions import dense_to_tilesparse
 from lib_sparse.src.triton_operators import unpack_batch_
 
 
-DEFAULT_SHAPES = ((1000, 4096), (4000, 4096), (15000, 4096))
-PACK_SBIT = os.environ.get("PACK_SBIT", "0") == "1"
-BENCHMARK_DTYPE = getattr(
-    torch, os.environ.get("BENCHMARK_DTYPE", "bfloat16")
-)
+DEFAULT_SHAPES = ((1000, 4096), (15000, 4096), (21504, 8000))
+PACK_SBIT = True
+USE_BUFFER = True
+BENCHMARK_DTYPE = torch.bfloat16
 
 
 def generate_data(
@@ -56,15 +54,18 @@ def decompress(sparse: BitsparseTensor) -> Tensor:
 
 def compress_batch(
     tensors: list[Tensor],
-    storage_dtype: torch.dtype,
     pack_sbit: bool,
+    buffer: TensorBuffer | None = None,
 ) -> list[BitsparseTensor]:
-    """Compress every dense tensor in a batch."""
+    """Compress a batch, reusing shared value storage when supplied."""
+    if buffer is not None:
+        buffer.reset_buffer()
     return [
         dense_to_tilesparse(
             tensor,
+            scale=None,
+            sparse_data=buffer,
             pack_sbit=pack_sbit,
-            storage_dtype=storage_dtype,
         )
         for tensor in tensors
     ]
@@ -79,12 +80,27 @@ def benchmark_shape(
     tensors: list[Tensor],
     iters: int,
     warmup: int,
-    storage_dtype: torch.dtype,
     pack_sbit: bool,
+    use_buffer: bool = False,
 ) -> tuple[list[BitsparseTensor], list[Tensor], float, float, float]:
     """Time batched compression followed by batched decompression."""
+    buffer = None
+    if use_buffer:
+        # Reserve worst-case NNZ capacity outside timing. Packed allocations
+        # can each add up to seven values of offset alignment padding.
+        capacity = sum(tensor.numel() for tensor in tensors)
+        if pack_sbit:
+            capacity += 7 * len(tensors)
+            size = (capacity * bits_per_value(tensors[0].dtype) + 7) // 8
+        else:
+            size = capacity * tensors[0].element_size()
+        buffer = TensorBuffer(
+            size, device=tensors[0].device, dtype=tensors[0].dtype,
+            pack_sbit=pack_sbit,
+        )
+
     for _ in range(warmup):
-        compressed = compress_batch(tensors, storage_dtype, pack_sbit)
+        compressed = compress_batch(tensors, pack_sbit, buffer)
         decompressed = decompress_batch(compressed)
     torch.cuda.synchronize()
 
@@ -97,7 +113,7 @@ def benchmark_shape(
         decompress_end = torch.cuda.Event(enable_timing=True)
 
         compress_start.record()
-        compressed = compress_batch(tensors, storage_dtype, pack_sbit)
+        compressed = compress_batch(tensors, pack_sbit, buffer)
         compress_end.record()
         decompressed = decompress_batch(compressed)
         decompress_end.record()
@@ -123,7 +139,7 @@ def main() -> None:
 
     generator = torch.Generator(device=device).manual_seed(0)
     total_roundtrip_ms = 0.0
-    print(f"  Storage_dtype={BENCHMARK_DTYPE}, Pack_sbit={PACK_SBIT}")
+    print(f"  Dtype={dtype}, Pack_sbit={PACK_SBIT}, Use_buffer={USE_BUFFER}")
 
     for sparsity in sp_ratios:
         print(f"  Target_sparsity={sparsity:.1%}")
@@ -131,13 +147,18 @@ def main() -> None:
             tensors = [generate_data(shape, generator, dtype, device, sparsity) for _ in range(n)]
 
             compressed, decompressed, compress_ms, decompress_ms, roundtrip_ms = benchmark_shape(
-                tensors, iters, warmup, BENCHMARK_DTYPE, PACK_SBIT
+                tensors, iters, warmup, PACK_SBIT, USE_BUFFER
             )
 
             # Correctness check
             for decompressed_tensor, original in zip(decompressed, tensors):
-                assert torch.equal(decompressed_tensor, original)
-            # Compression check
+                # Compare bytes for an exact round-trip check that also works
+                # for FP8, without requiring a floating-point equality kernel.
+                assert decompressed_tensor.dtype == original.dtype
+                assert torch.equal(
+                    decompressed_tensor.view(torch.uint8), original.view(torch.uint8)
+                )
+            # Logical compressed footprint, excluding unused buffer capacity.
             storage_ratios = []
             for ct, original in zip(compressed, tensors):
                 value_bytes = ct.vram_size()
@@ -152,7 +173,7 @@ def main() -> None:
             print(
                 f"shape={shape}, "
                 f"compress={compress_ms:.3f} ms, decompress={decompress_ms:.3f} ms, "
-                f"roundtrip={roundtrip_ms:.3f} ms, value_storage={storage_ratio:.1%}"
+                f"roundtrip={roundtrip_ms:.3f} ms, total_storage={storage_ratio:.4%}"
             )
             total_roundtrip_ms += roundtrip_ms
 
