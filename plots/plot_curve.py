@@ -1,4 +1,10 @@
-from plot_lib import plot_data
+"""Plot the VRAM/time tradeoff from the benchmark table below."""
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+
+from plot_lib import finish_plot, format_axes, plot_series, plot_style
 
 
 data = """Checkpoint		Sparse		Sparse 15-bit
@@ -13,7 +19,43 @@ vram	avg_time	vram	avg_time	vram	avg_time
 6971.4	2019.9	7556.7	1784.8	7507.0	1799.1
 6928.5	2066.3	7024.4	1802.7	6972.0	1800.1"""
 
-save_filename = "plots/vram_vs_time.pdf"
+save_filename = Path(__file__).resolve().with_name("vram_vs_time.pdf")
 
 
-plot_data(data, save_filename)
+def parse_data(table):
+    """Convert the two-header table's VRAM/time pairs into (label, x, y)."""
+    lines = [line.strip() for line in table.strip().splitlines() if line.strip()]
+    labels = [label.strip() for label in lines[0].split("\t") if label.strip()]
+    rows = [[float(value) for value in line.split()] for line in lines[2:]]
+
+    return [
+        (
+            label,
+            [row[index * 2 + 1] for row in rows],
+            [row[index * 2] for row in rows],
+        )
+        for index, label in enumerate(labels)
+    ]
+
+
+def plot_curve(table):
+    """Build the benchmark figure and return it without saving or showing it."""
+    with plot_style():
+        fig, ax = plt.subplots()
+        plot_series(ax, parse_data(table))
+        format_axes(
+            ax, xlabel="Average time (ms)", ylabel="VRAM (MiB)", yformat="{x:,.0f}",
+        )
+        finish_plot(ax)
+    return fig, ax
+
+
+def main():
+    with plot_style():
+        fig, _ = plot_curve(data)
+        fig.savefig(save_filename, format="pdf")
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
