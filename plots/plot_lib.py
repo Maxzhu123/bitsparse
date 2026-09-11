@@ -1,5 +1,6 @@
 """Reusable Matplotlib styling and axes-based plotting components."""
 
+import colorsys
 from itertools import cycle
 
 import matplotlib.pyplot as plt
@@ -57,6 +58,46 @@ LINE_STYLES = ("-", "--", "-.", ":")
 NEUTRAL_COLOR = "#333333"
 LAYOUT_PAD = 0.5
 
+# Ordered groups (e.g. network layers) walk the hue wheel from red to violet,
+# so the color advances with the group's index. The walk deliberately stops
+# short of the full circle: wrapping 360 degrees puts the last group only
+# 1/count back from the first, which makes layer 0 and layer 11 neighbours on
+# the wheel so they read as the same red. Ending at three quarters of the wheel
+# instead puts them at opposite ends of the spectrum (red vs violet) while still
+# covering the whole rainbow. Lightness cycles through GROUP_CONTRAST_LEVELS
+# independently of the hue, so neighbouring layers differ in tone as well as
+# hue. Each tone's lightness is solved to hold its target contrast against
+# white; 3.0 is the WCAG minimum for graphical objects.
+GROUP_SATURATION = 0.85
+GROUP_CONTRAST_LEVELS = (3.0, 4.6, 6.6)
+GROUP_HUE_SPAN = 0.75
+
+
+def _relative_luminance(rgb):
+    """Return the WCAG relative luminance of an ``(r, g, b)`` triple in 0-1."""
+    def linearize(channel):
+        return channel / 12.92 if channel <= 0.03928 else ((channel + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = (linearize(channel) for channel in rgb)
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def _color_at_hue(hue, saturation, target_luminance):
+    """Return the ``(r, g, b)`` at ``hue`` whose luminance is ``target_luminance``.
+
+    Lightness is found by bisection. Hues that cannot reach the target even at
+    the lightness ceiling (saturated blues and reds) are returned at the ceiling
+    so they stay as rich as possible rather than turning pale.
+    """
+    low, high = 0.0, 0.5
+    for _ in range(30):
+        middle = (low + high) / 2
+        if _relative_luminance(colorsys.hls_to_rgb(hue, middle, saturation)) > target_luminance:
+            high = middle
+        else:
+            low = middle
+    return colorsys.hls_to_rgb(hue, (low + high) / 2, saturation)
+
 
 def plot_style(overrides=None, *, wide=False):
     """Return a style context; use around figure creation, plotting and saving.
@@ -88,18 +129,53 @@ def plot_series(ax, series, *, styles=SERIES_STYLES, **line_kwargs):
     return lines
 
 
-def plot_grouped_series(ax, x, groups, metrics):
+def sample_group_colors(count, *, saturation=GROUP_SATURATION,
+                        contrast_levels=GROUP_CONTRAST_LEVELS,
+                        hue_span=GROUP_HUE_SPAN):
+    """Return ``count`` vivid colors ordered by the group's position.
+
+    Hue walks from red to violet across ``hue_span`` of the wheel, so ordered
+    groups (layer 0, layer 1, ...) read as a rainbow and the first and last
+    groups land at opposite ends of it rather than next to each other. Lightness
+    cycles through ``contrast_levels`` independently of the hue, which keeps
+    neighbouring layers apart. Each tone's lightness is solved to hold its
+    target contrast against white, so every color stays legible on white.
+    """
+    if count < 1:
+        raise ValueError("count must be at least 1")
+    levels = tuple(contrast_levels)
+    if not levels:
+        raise ValueError("contrast_levels must contain at least one value")
+    if count == 1:
+        offsets = [0.5]
+    else:
+        offsets = [index / (count - 1) for index in range(count)]
+    return [
+        _color_at_hue(
+            hue_span * offset, saturation, 1.05 / levels[index % len(levels)] - 0.05,
+        )
+        for index, offset in enumerate(offsets)
+    ]
+
+
+def plot_grouped_series(ax, x, groups, metrics, *, colors=None):
     """Plot ``{group_label: {metric: y}}`` using color per group and style per metric.
 
     ``metrics`` is an ordered iterable of metric names: solid first, dashed
-    second. Each group must supply every metric. Return group and metric legend handles
-    for use with ``finish_plot``. Data parsing stays with the caller.
+    second. Each group must supply every metric. Groups take the given
+    ``colors`` in order, defaulting to the hue sweep from
+    :func:`sample_group_colors` so the color reflects the group's position.
+    Return group and metric legend handles for use with ``finish_plot``.
+    Data parsing stays with the caller.
     """
     metric_styles = list(zip(metrics, cycle(LINE_STYLES)))
-    palette = plt.get_cmap("tab20").colors
-    colors = cycle((*palette[::2], *palette[1::2]))
+    items = list(groups.items())
+    colors = sample_group_colors(len(items)) if colors is None else list(colors)
+    if len(colors) != len(items):
+        raise ValueError(f"expected {len(items)} colors, got {len(colors)}")
+
     group_handles = []
-    for (label, values), color in zip(groups.items(), colors):
+    for (label, values), color in zip(items, colors):
         for metric, linestyle in metric_styles:
             plot_series(
                 ax, [(f"{label} {metric}", x, values[metric])],

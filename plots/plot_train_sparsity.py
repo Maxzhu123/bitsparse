@@ -5,7 +5,9 @@ import re
 
 import matplotlib.pyplot as plt
 
-from plot_lib import finish_plot, format_axes, plot_grouped_series, plot_style
+from plot_lib import (
+    finish_plot, format_axes, plot_grouped_series, plot_style, sample_group_colors,
+)
 
 
 data = """
@@ -56,12 +58,17 @@ def plot_train_sparsity(table):
     steps, layers = parse_data(table)
     with plot_style(wide=True):
         fig, ax = plt.subplots()
+        # ``layers`` is sorted ascending, so hue walks red -> violet with depth
+        # and the first/last layers land at opposite ends of the spectrum; the
+        # sampler also cycles tone to keep neighbours apart. Linestyle keeps
+        # encoding the metric (solid = average sparsity, dashed = least sparse).
         layer_handles, _ = plot_grouped_series(
             ax, steps,
             {str(layer): metrics for layer, metrics in layers.items()},
             ("avg_sparsity", "least_sparse"),
+            colors=sample_group_colors(len(layers)),
         )
-        format_axes(ax, xlabel="Training step", ylabel="Sparsity")
+        format_axes(ax, xlabel="Training step", ylabel=r"$\rho$")
         finish_plot(
             ax, group_handles=layer_handles,
             group_title="Layer",
