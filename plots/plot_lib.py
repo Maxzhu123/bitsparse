@@ -5,7 +5,7 @@ from itertools import cycle
 
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from matplotlib.ticker import StrMethodFormatter
+from matplotlib.ticker import MultipleLocator, StrMethodFormatter
 
 
 # Distance between tick marks and their numbers, in points. The matplotlib
@@ -55,31 +55,36 @@ PLOT_PARAMS = {
     "ps.fonttype": 42,
 }
 
-SERIES_STYLES = (
-    {"color": "#333333", "marker": "o", "linestyle": "-"},
-    {"color": "#0072B2", "marker": "s", "linestyle": "--"},
-    {"color": "#D55E00", "marker": "^", "linestyle": "-."},
-)
+# Appearance per configuration, keyed by the name used in the legend. Every
+# figure looks its series up here, so a method keeps the same colour and marker
+# wherever it is plotted; assigning styles by column position instead would let
+# the same method come out a different colour in different figures. The hues are
+# Okabe-Ito, which stay distinct for colourblind readers, and the markers stay
+# distinguishable in greyscale.
+NEUTRAL_COLOR = "#333333"
+
+CONFIG_STYLES = {
+    "Base": {"color": NEUTRAL_COLOR, "marker": "o"},
+    "BitSparse": {"color": "#0072B2", "marker": "s"},
+    "Sign-bit": {"color": "#D55E00", "marker": "^"},
+    "Checkpoint": {"color": "#009E73", "marker": "D"},
+}
 
 WIDE_FIGURE_SIZE = (8, 4.5)
+# Point sizes on the rcParams that carry text. plot_style scales these together.
+FONT_KEYS = ("font.size", "axes.labelsize", "xtick.labelsize", "ytick.labelsize",
+             "legend.fontsize", "legend.title_fontsize")
+# A wide figure keeps the same point sizes as a narrow one, so its text looks
+# comparatively small once the figure is scaled to fit a page column. Applying
+# this scale restores the balance.
+WIDE_FONT_SCALE = 1.5
 LINE_STYLES = ("-", "--", "-.", ":")
-NEUTRAL_COLOR = "#333333"
 LAYOUT_PAD = 0.5
 # A legend placed beside the axes needs a wider margin than the plot alone,
 # otherwise its right-hand text ends up hard against the figure edge and gets
 # clipped as soon as the labels grow.
 LEGEND_LAYOUT_PAD = 1.0
 
-# Comparison figures with a dense baseline plus three optimised variants need a
-# fourth style, so the sparsified runs extend the neutral baseline with
-# Okabe-Ito hues, which stay distinct for colorblind readers. Callers choose the
-# linestyle, so the same styles serve both scatter and line plots.
-CONFIG_SERIES_STYLES = (
-    {"color": NEUTRAL_COLOR, "marker": "o"},
-    {"color": "#0072B2", "marker": "s"},
-    {"color": "#D55E00", "marker": "^"},
-    {"color": "#009E73", "marker": "D"},
-)
 
 # Legends are kept tight so they read as attached to their plot: a short
 # handle keeps each symbol close to its label instead of centring it in a wide
@@ -133,32 +138,37 @@ def _color_at_hue(hue, saturation, target_luminance):
     return colorsys.hls_to_rgb(hue, (low + high) / 2, saturation)
 
 
-def plot_style(overrides=None, *, wide=False):
+def plot_style(overrides=None, *, wide=False, font_scale=1.0):
     """Return a style context; use around figure creation, plotting and saving.
 
-    ``overrides`` accepts Matplotlib rcParams. Previous settings are restored
-    when the context exits, and importing this module has no styling effects.
+    ``overrides`` accepts Matplotlib rcParams. ``font_scale`` multiplies every
+    text size, which is how a wide figure keeps its text legible at page scale.
+    Previous settings are restored when the context exits, and importing this
+    module has no styling effects.
     """
     params = {**PLOT_PARAMS}
     if wide:
         params["figure.figsize"] = WIDE_FIGURE_SIZE
+    if font_scale != 1.0:
+        params.update({key: params[key] * font_scale for key in FONT_KEYS})
     return plt.rc_context({**params, **(overrides or {})})
 
 
-def plot_series(ax, series, *, styles=SERIES_STYLES, **line_kwargs):
+def plot_series(ax, series, *, styles=None, **line_kwargs):
     """Plot an iterable of ``(label, x_values, y_values)`` on an existing axes.
 
-    Styles cycle across series. Matplotlib line keyword arguments override
-    the shared styles. Return the created lines for further customization;
-    callers control labels, legends, layout, saving and display.
+    ``styles`` maps a label to its style so a named series keeps one appearance
+    across every figure, defaulting to :data:`CONFIG_STYLES`. Matplotlib line
+    keyword arguments override the shared styles. Return the created lines for
+    further customization; callers control labels, legends, layout and saving.
     """
-    styles = tuple(styles)
-    if not styles:
-        raise ValueError("styles must contain at least one line style")
+    styles = CONFIG_STYLES if styles is None else styles
 
     lines = []
-    for (label, x_values, y_values), style in zip(series, cycle(styles)):
-        options = {"markerfacecolor": "white", **style, **line_kwargs}
+    for label, x_values, y_values in series:
+        if label not in styles:
+            raise ValueError(f"no style defined for series {label!r}")
+        options = {"markerfacecolor": "white", **styles[label], **line_kwargs}
         lines.extend(ax.plot(x_values, y_values, label=label, **options))
     return lines
 
@@ -211,9 +221,10 @@ def plot_grouped_series(ax, x, groups, metrics, *, colors=None):
     group_handles = []
     for (label, values), color in zip(items, colors):
         for metric, linestyle in metric_styles:
+            title = f"{label} {metric}"
             plot_series(
-                ax, [(f"{label} {metric}", x, values[metric])],
-                styles=[{"color": color, "linestyle": linestyle}],
+                ax, [(title, x, values[metric])],
+                styles={title: {"color": color, "linestyle": linestyle}},
             )
         group_handles.append(Line2D([], [], color=color, label=label))
     metric_handles = [
@@ -223,12 +234,20 @@ def plot_grouped_series(ax, x, groups, metrics, *, colors=None):
     return group_handles, metric_handles
 
 
-def format_axes(ax, *, xlabel, ylabel, xformat="{x:,.0f}", yformat=None):
-    """Apply axis labels and optional Matplotlib number-format strings."""
+def format_axes(ax, *, xlabel, ylabel, xformat="{x:,.0f}", yformat=None, x_step=None):
+    """Apply axis labels and optional Matplotlib number-format strings.
+
+    ``x_step`` pins the x ticks to a fixed interval. Setting it is how a wide
+    figure keeps its x labels apart: the automatic locator thins ticks from the
+    rcParams font size, which rises with ``font_scale``, so its choice can no
+    longer be relied on to leave room.
+    """
     ax.set(xlabel=xlabel, ylabel=ylabel)
     for axis, pattern in ((ax.xaxis, xformat), (ax.yaxis, yformat)):
         if pattern is not None:
             axis.set_major_formatter(StrMethodFormatter(pattern))
+    if x_step is not None:
+        ax.xaxis.set_major_locator(MultipleLocator(x_step))
 
 
 def finish_plot(ax, *, group_handles=None, metric_handles=None, group_title=None,

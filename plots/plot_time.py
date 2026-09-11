@@ -15,7 +15,7 @@ from typing import TypedDict
 import matplotlib.pyplot as plt
 
 from plot_lib import (
-    CONFIG_SERIES_STYLES, finish_plot, format_axes, plot_series, plot_style,
+    CONFIG_STYLES, WIDE_FONT_SCALE, finish_plot, format_axes, plot_series, plot_style,
 )
 
 
@@ -42,6 +42,7 @@ class Dataset(TypedDict):
     x_name: str
     xlabel: str
     y_scale: float
+    x_step: float
     table: str
 
 
@@ -50,6 +51,7 @@ datasets: dict[str, Dataset] = {
         "x_name": "N_input",
         "xlabel": "Input tokens",
         "y_scale": 1.0,
+        "x_step": 1000.0,
         "table": """
 N_input Base BitSparse Sign-bit Checkpoint
 50 185 185 198 197
@@ -75,6 +77,7 @@ N_input Base BitSparse Sign-bit Checkpoint
         "x_name": "Length",
         "xlabel": "Sequence length",
         "y_scale": MS_PER_S,
+        "x_step": 5000.0,
         "table": """
 Length Base BitSparse Sign-bit Checkpoint
 256 0.022 0.024 0.025 0.025
@@ -117,17 +120,18 @@ def parse_data(table, *, x_name, y_scale):
     ]
 
 
-def plot_time(table, *, x_name, xlabel, y_scale):
+def plot_time(table, *, x_name, xlabel, y_scale, x_step):
     """Build a time/input-length line plot and return it without saving it."""
     series = parse_data(table, x_name=x_name, y_scale=y_scale)
-    with plot_style(wide=True):
+    with plot_style(wide=True, font_scale=WIDE_FONT_SCALE):
         fig, ax = plt.subplots()
         # One line per configuration. The style carries no linestyle, so each
         # run draws as a solid line with its own marker.
-        plot_series(ax, series, styles=CONFIG_SERIES_STYLES)
+        plot_series(ax, series, styles=CONFIG_STYLES)
         # Times land on whole milliseconds in both datasets, so integer ticks
         # read cleanly without a decimal point.
-        format_axes(ax, xlabel=xlabel, ylabel=YLABEL, yformat="{x:,.0f}")
+        format_axes(ax, xlabel=xlabel, ylabel=YLABEL, yformat="{x:,.0f}",
+                    x_step=x_step)
         finish_plot(ax, legend_outside=True)
     return fig, ax
 
@@ -135,14 +139,17 @@ def plot_time(table, *, x_name, xlabel, y_scale):
 def main():
     # Save inside the style context so the configured ``savefig.bbox`` (tight)
     # and font settings apply; otherwise figures clip at the canvas edges.
-    with plot_style():
+    with plot_style(font_scale=WIDE_FONT_SCALE):
         for filename, dataset in datasets.items():
             fig, _ = plot_time(
                 dataset["table"], x_name=dataset["x_name"],
                 xlabel=dataset["xlabel"], y_scale=dataset["y_scale"],
+                x_step=dataset["x_step"],
             )
             fig.savefig(output_dir / filename, format="pdf")
-    plt.show()
+        # Kept inside the context: plt.show redraws, and a redraw under the
+        # default rcParams would size the ticks for the smaller font.
+        plt.show()
 
 
 if __name__ == "__main__":

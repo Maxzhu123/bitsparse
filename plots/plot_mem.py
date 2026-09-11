@@ -17,7 +17,7 @@ import numpy as np
 from matplotlib.lines import Line2D
 
 from plot_lib import (
-    CONFIG_SERIES_STYLES, finish_plot, format_axes, plot_series, plot_style,
+    CONFIG_STYLES, WIDE_FONT_SCALE, finish_plot, format_axes, plot_series, plot_style,
 )
 
 
@@ -38,6 +38,7 @@ datasets = {
     "nemotron_mem.pdf": {
         "x_name": "N_input",
         "xlabel": "Input tokens",
+        "x_step": 1000.0,
         "table": """
 N_input Base BitSparse Sign-bit Checkpoint
 50 16750 16660 16660 16652
@@ -63,6 +64,7 @@ N_input Base BitSparse Sign-bit Checkpoint
     "nanogpt_mem.pdf": {
         "x_name": "Length",
         "xlabel": "Sequence length",
+        "x_step": 5000.0,
         "table": """
 Length Base BitSparse Sign-bit Checkpoint
 256 1297 1165 1164 1116
@@ -136,17 +138,17 @@ def plot_fit(ax, x_values, y_values, *, color, x_max):
     return slope, intercept
 
 
-def plot_mem(table, *, x_name, xlabel):
+def plot_mem(table, *, x_name, xlabel, x_step):
     """Build a VRAM/input-length figure and return it without saving it."""
     # The harnesses report MiB; scale to GiB for a more readable axis.
     series = [
         (label, x_values, [vram / MIB_PER_GIB for vram in y_values])
         for label, x_values, y_values in parse_data(table, x_name=x_name)
     ]
-    with plot_style(wide=True):
+    with plot_style(wide=True, font_scale=WIDE_FONT_SCALE):
         fig, ax = plt.subplots()
         plot_series(
-            ax, series, styles=CONFIG_SERIES_STYLES, linestyle="none",
+            ax, series, styles=CONFIG_STYLES, linestyle="none",
             markersize=5.5, markeredgewidth=1.1,
         )
         # The measured points alone decide the axes' extent. Capturing it here
@@ -155,16 +157,18 @@ def plot_mem(table, *, x_name, xlabel):
         # was actually measured.
         x_limits = ax.get_xlim()
         y_limits = ax.get_ylim()
-        # One dotted fit per run, drawn to the same right edge. Each run's
-        # equation is kept so the legend can show it under that run's symbol.
-        equations = []
-        for (_, x_values, y_values), style in zip(series, CONFIG_SERIES_STYLES):
+        # One dotted fit per run, drawn to the same right edge. Each fit is kept
+        # with its run's name so the legend can show the equation under that
+        # run's symbol.
+        fits = []
+        for name, x_values, y_values in series:
             slope, _ = plot_fit(
-                ax, x_values, y_values, color=style["color"], x_max=x_limits[1],
+                ax, x_values, y_values, color=CONFIG_STYLES[name]["color"],
+                x_max=x_limits[1],
             )
-            equations.append(format_fit_equation(slope))
+            fits.append((name, format_fit_equation(slope)))
         format_axes(
-            ax, xlabel=xlabel, ylabel="Peak VRAM / GiB", yformat="{x:,.1f}",
+            ax, xlabel=xlabel, ylabel="Peak VRAM / GiB", yformat="{x:,.6g}", x_step=x_step,
         )
         ax.set_xlim(*x_limits)
         ax.set_ylim(*y_limits)
@@ -172,7 +176,8 @@ def plot_mem(table, *, x_name, xlabel):
         # beneath its run's symbol. Those rows carry a blank handle, which
         # indents them under the symbol they belong to.
         legend_handles, legend_labels = [], []
-        for (name, _, _), style, equation in zip(series, CONFIG_SERIES_STYLES, equations):
+        for name, equation in fits:
+            style = CONFIG_STYLES[name]
             legend_handles.append(Line2D(
                 [], [], color=style["color"], marker=style["marker"],
                 linestyle="none", markerfacecolor="white",
@@ -191,13 +196,16 @@ def plot_mem(table, *, x_name, xlabel):
 def main():
     # Save inside the style context so the configured ``savefig.bbox`` (tight)
     # and font settings apply; otherwise figures clip at the canvas edges.
-    with plot_style():
+    with plot_style(font_scale=WIDE_FONT_SCALE):
         for filename, dataset in datasets.items():
             fig, _ = plot_mem(
                 dataset["table"], x_name=dataset["x_name"], xlabel=dataset["xlabel"],
+                x_step=dataset["x_step"],
             )
             fig.savefig(output_dir / filename, format="pdf")
-    plt.show()
+        # Kept inside the context: plt.show redraws, and a redraw under the
+        # default rcParams would size the ticks for the smaller font.
+        plt.show()
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ MIB_PER_GIB = 1024.0
 
 
 datasets = {
-    "relu2_80_pareto.pdf": """Checkpoint		Sparse		Sparse 15-bit
+    "relu2_80_pareto.pdf": """Checkpoint		BitSparse		Sign-bit
 layers	vram	avg_time	vram	avg_time	vram	avg_time
 0	12346.5	1790.8	12346.5	1790.6	12345.5	1790.4
 1	11689.2	1836.9	12057.6	1794.0	12039.6	1795.4
@@ -30,7 +30,7 @@ layers	vram	avg_time	vram	avg_time	vram	avg_time
 6	8409.0	2061.9	9639.8	1796.3	9578.0	1807.3
 7	7990.9	2107.5	9112.4	1796.7	9044.1	1808.3
 8	8241.0	2153.1	7268.6	1797.6	7200.4	1809.7""",
-    "relu_80_pareto.pdf": """Checkpoint		Sparse		Sparse 15-bit
+    "relu_80_pareto.pdf": """Checkpoint		BitSparse		Sign-bit
 layers	vram	avg_time	vram	avg_time	vram	avg_time
 0	11047.0	1747.39	11046.0	1744.6	11046.0	1744.65
 1	10387.7	1783.74	10757.1	1747.64	10738.0	1750.94
@@ -41,7 +41,7 @@ layers	vram	avg_time	vram	avg_time	vram	avg_time
 6	7101.5	1983.73	8122.2	1776.86	8073.0	1785.76
 7	6971.4	2016.24	7556.7	1774.31	7507.0	1782.76
 8	6928.5	2053.16	7024.4	1776.74	6972.0	1786.1""",
-    "relu_50_pareto.pdf": """Checkpoint		Sparse		Sparse 15-bit
+    "relu_50_pareto.pdf": """Checkpoint		BitSparse		Sign-bit
 layers	vram	avg_time	vram	avg_time	vram	avg_time
 0	11047.0	1749.29	11047.0	1745.96	11047.0	1745.94
 1	10387.7	1782.58	10758.2	1748.42	10740.1	1758.32
@@ -52,7 +52,7 @@ layers	vram	avg_time	vram	avg_time	vram	avg_time
 6	7101.5	1977.2	9221.9	1768.94	9109.1	1783.38
 7	6971.4	2013.15	8889.2	1772.31	8755.5	1790.2
 8	6928.5	2050.97	8799.7	1783.74	8632.2	1804.72""",
-    "relu2_50_pareto.pdf": """Checkpoint		Sparse		Sparse 15-bit
+    "relu2_50_pareto.pdf": """Checkpoint		BitSparse		Sign-bit
 layers	vram	avg_time	vram	avg_time	vram	avg_time
 0	12346.5	1807.8	12346.5	1803.6	12346.5	1803.4
 1	11689.2	1852.4	12057.7	1804.5	12057.7	1807.2
