@@ -21,6 +21,9 @@ _PACK_CONFIGS = [
     triton.Config({"BLOCK_SIZE": 512}, num_warps=2, num_stages=1),
     triton.Config({"BLOCK_SIZE": 1024}, num_warps=2, num_stages=1),
     triton.Config({"BLOCK_SIZE": 1024}, num_warps=4, num_stages=1),
+    triton.Config({"BLOCK_SIZE": 2048}, num_warps=4, num_stages=1),
+    triton.Config({"BLOCK_SIZE": 4096}, num_warps=4, num_stages=1),
+    triton.Config({"BLOCK_SIZE": 4096}, num_warps=8, num_stages=1),
 ]
 
 
@@ -80,58 +83,63 @@ def _pack_kernel(
     total_bits = numel * bits
     num_bytes = (start_shift + total_bits + 7) // 8
 
-    byte_offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    output_mask = byte_offsets < num_bytes
-    output_bytes = first_byte + byte_offsets
+    # Reuse a bounded grid and stop at the actual byte count on the GPU.
+    # The buffer path need not launch one program per dense-capacity block.
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    while block_start < num_bytes:
+        byte_offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        output_mask = byte_offsets < num_bytes
+        output_bytes = first_byte + byte_offsets
 
-    # Every ``bits`` output bytes consume exactly eight values.  Computing the
-    # source position within that repeating group keeps the lane-wise math in
-    # 32 bits; only the absolute output address needs the 64-bit stream offset.
-    bit_in_group = (byte_offsets % bits) * 8 - start_shift
-    previous_value = bit_in_group < 0
-    input_indices = (
-        (byte_offsets // bits) * 8
-        + tl.where(previous_value, -1, bit_in_group // bits)
-    )
-    bit_offsets = tl.where(
-        previous_value, bit_in_group + bits, bit_in_group % bits
-    )
+        # Every ``bits`` output bytes consume exactly eight values.  Computing the
+        # source position within that repeating group keeps the lane-wise math in
+        # 32 bits; only the absolute output address needs the 64-bit stream offset.
+        bit_in_group = (byte_offsets % bits) * 8 - start_shift
+        previous_value = bit_in_group < 0
+        input_indices = (
+            (byte_offsets // bits) * 8
+            + tl.where(previous_value, -1, bit_in_group // bits)
+        )
+        bit_offsets = tl.where(
+            previous_value, bit_in_group + bits, bit_in_group % bits
+        )
 
-    # The first byte can begin partway through a destination byte, but its
-    # source still starts at input value zero.
-    first = byte_offsets == 0
-    input_indices = tl.where(first, 0, input_indices)
-    bit_offsets = tl.where(first, 0, bit_offsets)
+        # The first byte can begin partway through a destination byte, but its
+        # source still starts at input value zero.
+        first = byte_offsets == 0
+        input_indices = tl.where(first, 0, input_indices)
+        bit_offsets = tl.where(first, 0, bit_offsets)
 
-    value0 = tl.load(
-        input_ptr + input_indices,
-        mask=output_mask & (input_indices < numel),
-        other=0,
-    ).to(tl.uint32)
-    value1_mask = output_mask & ((input_indices + 1) < numel)
-    if CODEC == 0:
-        # A BF16 byte only straddles values when fewer than eight bits remain.
-        value1_mask &= bit_offsets > bits - 8
-    value1 = tl.load(
-        input_ptr + input_indices + 1,
-        mask=value1_mask,
-        other=0,
-    ).to(tl.uint32)
-    packed = (value0 >> bit_offsets) | (value1 << (bits - bit_offsets))
-    packed = (packed << tl.where(first, start_shift, 0)) & 0xFF
+        value0 = tl.load(
+            input_ptr + input_indices,
+            mask=output_mask & (input_indices < numel),
+            other=0,
+        ).to(tl.uint32)
+        value1_mask = output_mask & ((input_indices + 1) < numel)
+        if CODEC == 0:
+            # A BF16 byte only straddles values when fewer than eight bits remain.
+            value1_mask &= bit_offsets > bits - 8
+        value1 = tl.load(
+            input_ptr + input_indices + 1,
+            mask=value1_mask,
+            other=0,
+        ).to(tl.uint32)
+        packed = (value0 >> bit_offsets) | (value1 << (bits - bit_offsets))
+        packed = (packed << tl.where(first, start_shift, 0)) & 0xFF
 
-    end_shift = ((start_shift + total_bits) % 8).to(tl.int32)
-    valid_lo = tl.where(first, start_shift, 0)
-    valid_hi = tl.where(
-        (byte_offsets == num_bytes - 1) & (end_shift != 0), end_shift, 8
-    )
-    valid_bits = ((1 << valid_hi) - 1) & ~((1 << valid_lo) - 1)
+        end_shift = ((start_shift + total_bits) % 8).to(tl.int32)
+        valid_lo = tl.where(first, start_shift, 0)
+        valid_hi = tl.where(
+            (byte_offsets == num_bytes - 1) & (end_shift != 0), end_shift, 8
+        )
+        valid_bits = ((1 << valid_hi) - 1) & ~((1 << valid_lo) - 1)
 
-    boundary = valid_bits != 0xFF
-    old = tl.load(
-        output_ptr + output_bytes,
-        mask=output_mask & boundary,
-        other=0,
-    ).to(tl.uint32)
-    merged = (old & ~valid_bits) | (packed & valid_bits)
-    tl.store(output_ptr + output_bytes, merged, mask=output_mask)
+        boundary = valid_bits != 0xFF
+        old = tl.load(
+            output_ptr + output_bytes,
+            mask=output_mask & boundary,
+            other=0,
+        ).to(tl.uint32)
+        merged = (old & ~valid_bits) | (packed & valid_bits)
+        tl.store(output_ptr + output_bytes, merged, mask=output_mask)
+        block_start += tl.num_programs(0) * BLOCK_SIZE

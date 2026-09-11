@@ -95,8 +95,10 @@ def compact_vals(
                 else tiles_in_chunk * TILE_NUMEL
             )
             launch_bytes = packed_nbytes(launch_numel, bits_per_value(storage_dtype)) + 1
+            # Each program strides over the actual byte count on-device. Cap
+            # the grid so sparse buffered inputs avoid a dense-sized launch.
             _pack_kernel[
-                lambda meta: (triton.cdiv(launch_bytes, meta["BLOCK_SIZE"]),)
+                lambda meta: (min(1024, triton.cdiv(launch_bytes, meta["BLOCK_SIZE"])),)
             ](
                 raw_vals.view(torch.uint16 if codec == 0 else torch.uint8),
                 vals, vals_offset,

@@ -18,6 +18,7 @@ of shape [BLOCK_M × BLOCK_N].  Every tile is independently compressed:
 
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 from .bitpacking import load_packed_at_indices
 
@@ -45,7 +46,7 @@ _MASK_CONFIGS = [
     triton.Config({}, num_warps=8, num_stages=2),
 ]
 
-# Tile compaction is dominated by the 4096-element scan and scatter. Keep the
+# Tile compaction scans packed-byte counts and scatters active values. Keep the
 # search small: wider launches help the scan, while extra pipeline stages have
 # limited value for this memory-bound kernel.
 _COMPACT_VALS_CONFIGS = [
@@ -140,9 +141,14 @@ def _compact_vals_kernel(
     bits = (bytes_2d >> tl.arange(0, 8)[None, :]) & 1
     mask_bits = tl.reshape(bits.to(tl.int32), (TILE_NUMEL,))
 
-    # rank[i] = number of nonzero entries before position i within this tile.
-    # Used as the offset from 'base' to write the i-th nonzero value.
-    ranks = tl.cumsum(mask_bits, 0) - 1
+    # Scan one count per mask byte, then add the rank within that byte.
+    # This preserves tile order with a scan eight times shorter than the
+    # element-wise mask scan.
+    byte_counts = libdevice.popc(bytes_val)
+    byte_starts = tl.cumsum(byte_counts, 0) - byte_counts
+    lower_bits = bytes_2d & ((1 << tl.arange(0, 8)[None, :]) - 1)
+    local_ranks = libdevice.popc(lower_bits)
+    ranks = tl.reshape(byte_starts[:, None] + local_ranks, (TILE_NUMEL,))
     tl.store(vals_out_ptr + base + ranks, v, mask=(mask_bits == 1))
 
 
