@@ -98,7 +98,7 @@ def plot_pareto(table):
             markersize=5.0, markeredgewidth=1.1,
         )
         format_axes(
-            ax, xlabel="Average time (ms)", ylabel="VRAM (GiB)", yformat="{x:,.1f}",
+            ax, xlabel="Average time / ms", ylabel="VRAM / GiB", yformat="{x:,.1f}",
         )
         finish_plot(ax)
     return fig, ax

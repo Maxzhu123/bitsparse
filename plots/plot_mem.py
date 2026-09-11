@@ -164,7 +164,7 @@ def plot_mem(table, *, x_name, xlabel):
             )
             equations.append(format_fit_equation(slope))
         format_axes(
-            ax, xlabel=xlabel, ylabel="Peak VRAM (GiB)", yformat="{x:,.1f}",
+            ax, xlabel=xlabel, ylabel="Peak VRAM / GiB", yformat="{x:,.1f}",
         )
         ax.set_xlim(*x_limits)
         ax.set_ylim(*y_limits)
