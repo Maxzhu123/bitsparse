@@ -1,23 +1,36 @@
-"""Plot the VRAM/time tradeoff of the three methods as a Pareto-style scatter.
+"""Plot the VRAM/time tradeoff of the compressed methods as a Pareto scatter.
 
-Each entry in ``datasets`` maps an output filename to a benchmark table listing,
-for every checkpoint layer, the VRAM footprint and average time of each method.
-Lower is better on both axes, so each figure scatters the methods' configurations
-to expose the Pareto tradeoff. ``main`` renders one PDF per dataset.
+Each dataset is a benchmark table listing, for every checkpoint layer, the VRAM
+footprint and average time of each method. Lower is better on both axes, so
+plotting the two against each other exposes the tradeoff the methods trace out
+as more layers are compressed, and the front can be read off directly.
+
+The table groups each method's two metrics together, keeping one method's
+measurements adjacent. Its first column is the checkpoint ordinal rather than an
+axis, so the x values the parser reads go unused.
 """
 
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-from plot_lib import finish_plot, format_axes, plot_series, plot_style
+from plot_lib import finish_plot, format_axes, plot_series
+from plot_tables import MIB_PER_GIB, parse_grouped, render
 
 
 output_dir = Path(__file__).resolve().parent
 
-MIB_PER_GIB = 1024.0
+# The first table column is the checkpoint ordinal, not an axis: the figure
+# plots the two metrics against each other.
+X_NAME = "layers"
+METRICS = ("vram", "avg_time")
 
+# Both axes carry the same quantity in every dataset, so the titles are shared
+# rather than repeated per entry.
+XLABEL = "Average time / ms"
+YLABEL = "VRAM / GiB"
 
+# Each table records VRAM in MiB; the axis is labelled in GiB.
 datasets = {
     "relu2_80_pareto.pdf": """Checkpoint		BitSparse		Sign-bit
 layers	vram	avg_time	vram	avg_time	vram	avg_time
@@ -65,54 +78,31 @@ layers	vram	avg_time	vram	avg_time	vram	avg_time
 8	8241.0	2166.8	8805.5	1814.8	8805.5	1837.3""",
 }
 
-def parse_data(table):
-    """Convert the two-header table's VRAM/time pairs into (label, x, y)."""
-    lines = [line.strip() for line in table.strip().splitlines() if line.strip()]
-    labels = [label.strip() for label in lines[0].split("\t") if label.strip()]
-    rows = [[float(value) for value in line.split()] for line in lines[2:]]
-
-    return [
-        (
-            label,
-            [row[index * 2 + 2] for row in rows],
-            [row[index * 2 + 1] for row in rows],
-        )
-        for index, label in enumerate(labels)
-    ]
-
 
 def plot_pareto(table):
-    """Build the VRAM/time figure (VRAM in GiB) and return it without saving it."""
-    # Benchmarks report VRAM in MiB; scale to GiB for a more readable axis.
+    """Build one VRAM/time figure and return it without saving it."""
+    _, groups = parse_grouped(table, x_name=X_NAME, metrics=METRICS)
+    # Convert the benchmark's MiB onto the GiB axis.
     series = [
-        (label, times, [vram / MIB_PER_GIB for vram in vrams])
-        for label, times, vrams in parse_data(table)
+        (label, columns["avg_time"], [vram / MIB_PER_GIB for vram in columns["vram"]])
+        for label, columns in groups.items()
     ]
-    with plot_style():
-        fig, ax = plt.subplots()
-        # Join each method's checkpoints in layer order so the trajectory as
-        # more layers are compressed stays visible. Thin solid lines in each
-        # series' color, with the white-faced markers drawn on top of the line.
-        plot_series(
-            ax, series, linestyle="-", linewidth=1.0,
-            markersize=5.0, markeredgewidth=1.1,
-        )
-        format_axes(
-            ax, xlabel="Average time / ms", ylabel="VRAM / GiB", yformat="{x:,.1f}",
-        )
-        finish_plot(ax)
+
+    fig, ax = plt.subplots()
+    # Join each method's checkpoints in layer order so the trajectory as more
+    # layers are compressed stays visible. Thin solid lines with the white-faced
+    # markers drawn on top of them.
+    plot_series(
+        ax, series, linestyle="-", linewidth=1.0,
+        markersize=5.0, markeredgewidth=1.1,
+    )
+    format_axes(ax, xlabel=XLABEL, ylabel=YLABEL, yformat="{x:,.1f}")
+    finish_plot(ax)
     return fig, ax
 
 
 def main():
-    # Save inside the style context so the configured ``savefig.bbox`` (tight)
-    # and font settings apply; otherwise the figure is written at the raw
-    # canvas edges and the rotated y-label gets clipped.
-    with plot_style():
-        for filename, table in datasets.items():
-            fig, _ = plot_pareto(table)
-            fig.savefig(output_dir / filename, format="pdf")
-    plt.show()
+    render(datasets, plot_pareto, output_dir=output_dir)
 
 
 if __name__ == "__main__":

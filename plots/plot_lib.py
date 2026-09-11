@@ -1,4 +1,10 @@
-"""Reusable Matplotlib styling and axes-based plotting components."""
+"""Reusable Matplotlib styling and axes-based plotting components.
+
+Nothing here reads data; callers pass series in and keep control of labels,
+legends, layout and saving. :func:`plot_style` is the one entry point that
+changes global state, and it restores it on exit, so importing this module has
+no styling side effects.
+"""
 
 import colorsys
 from itertools import cycle
@@ -8,10 +14,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import MultipleLocator, StrMethodFormatter
 
 
-# Distance between tick marks and their numbers, in points. The matplotlib
-# default leaves them almost touching.
-TICK_PAD = 7.0
-
+# The base rcParams every figure starts from.
 PLOT_PARAMS = {
     "figure.figsize": (5.5, 3.4),
     "figure.dpi": 150,
@@ -43,9 +46,9 @@ PLOT_PARAMS = {
     "xtick.labelsize": 11,
     "ytick.labelsize": 11,
     # The default tick padding is half the tick-mark length, which leaves the
-    # numbers touching the marks. This gives them clearance.
-    "xtick.major.pad": TICK_PAD,
-    "ytick.major.pad": TICK_PAD,
+    # numbers touching the marks. This gap clears them.
+    "xtick.major.pad": 7.0,
+    "ytick.major.pad": 7.0,
     "legend.fontsize": 11,
     "legend.title_fontsize": 12,
     "legend.frameon": False,
@@ -55,14 +58,18 @@ PLOT_PARAMS = {
     "ps.fonttype": 42,
 }
 
-# Appearance per configuration, keyed by the name used in the legend. Every
-# figure looks its series up here, so a method keeps the same colour and marker
-# wherever it is plotted; assigning styles by column position instead would let
-# the same method come out a different colour in different figures. The hues are
-# Okabe-Ito, which stay distinct for colourblind readers, and the markers stay
-# distinguishable in greyscale.
+
+# --------------------------------------------------------------------------- #
+# Series appearance
+# --------------------------------------------------------------------------- #
+
 NEUTRAL_COLOR = "#333333"
 
+# Appearance per configuration, keyed by the name that appears in the legend.
+# Figures look their series up here rather than taking a style by column
+# position, so a configuration keeps one colour and marker wherever it is
+# plotted. The hues are Okabe-Ito, which stay distinct for colourblind readers,
+# and the markers stay distinguishable in greyscale.
 CONFIG_STYLES = {
     "Base": {"color": NEUTRAL_COLOR, "marker": "o"},
     "BitSparse": {"color": "#0072B2", "marker": "s"},
@@ -70,43 +77,65 @@ CONFIG_STYLES = {
     "Checkpoint": {"color": "#009E73", "marker": "D"},
 }
 
+# Line styles cycled across metrics when one figure carries several per group.
+LINE_STYLES = ("-", "--", "-.", ":")
+
+
+# --------------------------------------------------------------------------- #
+# Figure geometry
+# --------------------------------------------------------------------------- #
+
 WIDE_FIGURE_SIZE = (8, 4.5)
-# Point sizes on the rcParams that carry text. plot_style scales these together.
-FONT_KEYS = ("font.size", "axes.labelsize", "xtick.labelsize", "ytick.labelsize",
-             "legend.fontsize", "legend.title_fontsize")
+LAYOUT_PAD = 0.5
+# A legend placed beside the axes needs a wider margin than the plot alone,
+# otherwise its right-hand text ends up hard against the figure edge and is
+# clipped as soon as the labels grow.
+LEGEND_LAYOUT_PAD = 1.0
+
+# Point sizes on the rcParams that carry text, which plot_style scales together.
+FONT_KEYS = (
+    "font.size",
+    "axes.labelsize",
+    "xtick.labelsize",
+    "ytick.labelsize",
+    "legend.fontsize",
+    "legend.title_fontsize",
+)
 # A wide figure keeps the same point sizes as a narrow one, so its text looks
 # comparatively small once the figure is scaled to fit a page column. Applying
 # this scale restores the balance.
 WIDE_FONT_SCALE = 1.5
-LINE_STYLES = ("-", "--", "-.", ":")
-LAYOUT_PAD = 0.5
-# A legend placed beside the axes needs a wider margin than the plot alone,
-# otherwise its right-hand text ends up hard against the figure edge and gets
-# clipped as soon as the labels grow.
-LEGEND_LAYOUT_PAD = 1.0
 
 
-# Legends are kept tight so they read as attached to their plot: a short
-# handle keeps each symbol close to its label instead of centring it in a wide
-# empty box, and trimming the padding stops blank space from inflating the
-# legend. The handle length also sets how far a companion row, such as a
-# fitted equation, is indented under the row above it.
+# --------------------------------------------------------------------------- #
+# Legend spacing
+# --------------------------------------------------------------------------- #
+
+# Legends are kept tight so they read as attached to their plot: a short handle
+# keeps each symbol close to its label instead of centring it in a wide empty
+# box, and trimming the padding stops blank space from inflating the legend. The
+# handle length also sets how far a companion row, such as a fitted equation, is
+# indented under the row above it.
 LEGEND_HANDLE_LENGTH = 1.0
 LEGEND_HANDLE_TEXT_PAD = 0.3
 LEGEND_BORDER_PAD = 0.3
 # How far a legend placed beside the axes sits from them, as an axes fraction.
 LEGEND_SIDE_ANCHOR = 1.005
 
-# Ordered groups (e.g. network layers) walk the hue wheel from red to violet,
-# so the color advances with the group's index. The walk deliberately stops
-# short of the full circle: wrapping 360 degrees puts the last group only
-# 1/count back from the first, which makes layer 0 and layer 11 neighbours on
-# the wheel so they read as the same red. Ending at three quarters of the wheel
-# instead puts them at opposite ends of the spectrum (red vs violet) while still
-# covering the whole rainbow. Lightness cycles through GROUP_CONTRAST_LEVELS
-# independently of the hue, so neighbouring layers differ in tone as well as
-# hue. Each tone's lightness is solved to hold its target contrast against
-# white; 3.0 is the WCAG minimum for graphical objects.
+
+# --------------------------------------------------------------------------- #
+# Ordered-group ramp
+# --------------------------------------------------------------------------- #
+
+# Ordered groups such as network layers walk the hue wheel from red to violet, so
+# the colour advances with the group's index. The walk deliberately stops short
+# of the full circle: wrapping 360 degrees puts the last group only 1/count back
+# from the first, making the two neighbours on the wheel so they read as the same
+# red. Ending at three quarters of the wheel instead puts them at opposite ends
+# of the spectrum while still covering the rainbow. Lightness cycles through the
+# contrast levels independently of hue, so neighbouring groups differ in tone as
+# well as in colour. Each tone's lightness is solved to hold its target contrast
+# against white, and 3.0 is the WCAG minimum for graphical objects.
 GROUP_SATURATION = 0.85
 GROUP_CONTRAST_LEVELS = (3.0, 4.6, 6.6)
 GROUP_HUE_SPAN = 0.75
@@ -115,23 +144,25 @@ GROUP_HUE_SPAN = 0.75
 def _relative_luminance(rgb):
     """Return the WCAG relative luminance of an ``(r, g, b)`` triple in 0-1."""
     def linearize(channel):
-        return channel / 12.92 if channel <= 0.03928 else ((channel + 0.055) / 1.055) ** 2.4
+        if channel <= 0.03928:
+            return channel / 12.92
+        return ((channel + 0.055) / 1.055) ** 2.4
 
     red, green, blue = (linearize(channel) for channel in rgb)
     return 0.2126 * red + 0.7152 * green + 0.0722 * blue
 
 
-def _color_at_hue(hue, saturation, target_luminance):
-    """Return the ``(r, g, b)`` at ``hue`` whose luminance is ``target_luminance``.
+def _color_at_hue(hue, saturation, target):
+    """Return the ``(r, g, b)`` at ``hue`` whose luminance is ``target``.
 
-    Lightness is found by bisection. Hues that cannot reach the target even at
-    the lightness ceiling (saturated blues and reds) are returned at the ceiling
-    so they stay as rich as possible rather than turning pale.
+    Lightness is found by bisection. A hue that cannot reach the target even at
+    the lightness ceiling, as saturated blues and reds cannot, is returned at
+    that ceiling so it stays as rich as possible instead of turning pale.
     """
     low, high = 0.0, 0.5
     for _ in range(30):
         middle = (low + high) / 2
-        if _relative_luminance(colorsys.hls_to_rgb(hue, middle, saturation)) > target_luminance:
+        if _relative_luminance(colorsys.hls_to_rgb(hue, middle, saturation)) > target:
             high = middle
         else:
             low = middle
@@ -143,8 +174,7 @@ def plot_style(overrides=None, *, wide=False, font_scale=1.0):
 
     ``overrides`` accepts Matplotlib rcParams. ``font_scale`` multiplies every
     text size, which is how a wide figure keeps its text legible at page scale.
-    Previous settings are restored when the context exits, and importing this
-    module has no styling effects.
+    Settings are restored when the context exits.
     """
     params = {**PLOT_PARAMS}
     if wide:
@@ -157,10 +187,10 @@ def plot_style(overrides=None, *, wide=False, font_scale=1.0):
 def plot_series(ax, series, *, styles=None, **line_kwargs):
     """Plot an iterable of ``(label, x_values, y_values)`` on an existing axes.
 
-    ``styles`` maps a label to its style so a named series keeps one appearance
-    across every figure, defaulting to :data:`CONFIG_STYLES`. Matplotlib line
-    keyword arguments override the shared styles. Return the created lines for
-    further customization; callers control labels, legends, layout and saving.
+    ``styles`` maps a label to its style, defaulting to :data:`CONFIG_STYLES`, so
+    a named series looks the same in every figure. Line keyword arguments
+    override the shared styles. Return the created lines; the caller controls
+    labels, legends, layout and saving.
     """
     styles = CONFIG_STYLES if styles is None else styles
 
@@ -176,24 +206,20 @@ def plot_series(ax, series, *, styles=None, **line_kwargs):
 def sample_group_colors(count, *, saturation=GROUP_SATURATION,
                         contrast_levels=GROUP_CONTRAST_LEVELS,
                         hue_span=GROUP_HUE_SPAN):
-    """Return ``count`` vivid colors ordered by the group's position.
+    """Return ``count`` vivid colours ordered by the group's position.
 
-    Hue walks from red to violet across ``hue_span`` of the wheel, so ordered
-    groups (layer 0, layer 1, ...) read as a rainbow and the first and last
-    groups land at opposite ends of it rather than next to each other. Lightness
-    cycles through ``contrast_levels`` independently of the hue, which keeps
-    neighbouring layers apart. Each tone's lightness is solved to hold its
-    target contrast against white, so every color stays legible on white.
+    Hue walks from red to violet, so the first and last group land at opposite
+    ends of the spectrum rather than next to each other on the wheel, and
+    neighbouring groups differ in tone as well as in hue. Every colour is legible
+    on white. See the ramp constants above for the reasoning.
     """
     if count < 1:
         raise ValueError("count must be at least 1")
     levels = tuple(contrast_levels)
     if not levels:
         raise ValueError("contrast_levels must contain at least one value")
-    if count == 1:
-        offsets = [0.5]
-    else:
-        offsets = [index / (count - 1) for index in range(count)]
+
+    offsets = [0.5] if count == 1 else [index / (count - 1) for index in range(count)]
     return [
         _color_at_hue(
             hue_span * offset, saturation, 1.05 / levels[index % len(levels)] - 0.05,
@@ -203,14 +229,13 @@ def sample_group_colors(count, *, saturation=GROUP_SATURATION,
 
 
 def plot_grouped_series(ax, x, groups, metrics, *, colors=None):
-    """Plot ``{group_label: {metric: y}}`` using color per group and style per metric.
+    """Plot ``{group: {metric: values}}`` with one colour per group.
 
-    ``metrics`` is an ordered iterable of metric names: solid first, dashed
-    second. Each group must supply every metric. Groups take the given
-    ``colors`` in order, defaulting to the hue sweep from
-    :func:`sample_group_colors` so the color reflects the group's position.
-    Return group and metric legend handles for use with ``finish_plot``.
-    Data parsing stays with the caller.
+    ``metrics`` is an ordered iterable of metric names, which take the cycled
+    line styles in order and so must be supplied by every group. Groups take
+    ``colors`` in order, defaulting to the ramp from :func:`sample_group_colors`
+    so the colour reflects the group's position. Return the group and metric
+    legend handles for :func:`finish_plot`; data parsing stays with the caller.
     """
     metric_styles = list(zip(metrics, cycle(LINE_STYLES)))
     items = list(groups.items())
@@ -239,8 +264,8 @@ def format_axes(ax, *, xlabel, ylabel, xformat="{x:,.0f}", yformat=None, x_step=
 
     ``x_step`` pins the x ticks to a fixed interval. Setting it is how a wide
     figure keeps its x labels apart: the automatic locator thins ticks from the
-    rcParams font size, which rises with ``font_scale``, so its choice can no
-    longer be relied on to leave room.
+    rcParams font size, which rises with ``font_scale``, so its choice cannot be
+    relied on to leave room.
     """
     ax.set(xlabel=xlabel, ylabel=ylabel)
     for axis, pattern in ((ax.xaxis, xformat), (ax.yaxis, yformat)):
@@ -254,27 +279,32 @@ def finish_plot(ax, *, group_handles=None, metric_handles=None, group_title=None
                 legend_outside=False, legend_entries=None):
     """Apply shared legend placement and layout to an axes' figure.
 
-    Ordinary series use an inside legend, or one beside the axes when
-    ``legend_outside`` is set; pair that with ``plot_style(wide=True)`` so the
-    legend has room. ``legend_entries`` supplies an explicit ``(handles,
-    labels)`` pair for legends whose rows are not all plotted artists, such as
-    one annotating each series with an extra line of text. Grouped series use a
-    vertical legend and an optional metric key in reserved space on the right.
-
-    Every legend shares the same tight row spacing, so a symbol sits close to
-    its label and a legend beside the axes hugs the plot.
+    Ordinary series take an inside legend, or one beside the axes when
+    ``legend_outside`` is set, which needs ``plot_style(wide=True)`` to have room.
+    ``legend_entries`` supplies an explicit ``(handles, labels)`` pair for a
+    legend whose rows are not all plotted artists, such as one annotating each
+    series with an extra line of text. Grouped series take a vertical legend and
+    an optional metric key in reserved space on the right.
     """
-    spacing = {"borderpad": LEGEND_BORDER_PAD, "handlelength": LEGEND_HANDLE_LENGTH,
-               "handletextpad": LEGEND_HANDLE_TEXT_PAD}
+    spacing = {
+        "borderpad": LEGEND_BORDER_PAD,
+        "handlelength": LEGEND_HANDLE_LENGTH,
+        "handletextpad": LEGEND_HANDLE_TEXT_PAD,
+    }
     # A legend beside the axes needs the wider margin; an inside one does not.
     layout_pad = LEGEND_LAYOUT_PAD if (legend_outside or group_handles) else LAYOUT_PAD
+
     if group_handles is None:
         if legend_outside:
-            options = {"loc": "center left",
-                       "bbox_to_anchor": (LEGEND_SIDE_ANCHOR, 0.5),
-                       "borderaxespad": 0, **spacing}
+            options = {
+                "loc": "center left",
+                "bbox_to_anchor": (LEGEND_SIDE_ANCHOR, 0.5),
+                "borderaxespad": 0,
+                **spacing,
+            }
         else:
             options = {"loc": "best", "borderaxespad": 1.0, **spacing}
+
         if legend_entries is None:
             ax.legend(**options)
         else:

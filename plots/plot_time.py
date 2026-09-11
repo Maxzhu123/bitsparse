@@ -1,52 +1,36 @@
 """Wall-clock time against input length for the language-model runs.
+
 Each dataset is a table of measured step times, one column per configuration.
-Every run is drawn as its own line, so the cost of the sparsified, packed and
-checkpointed variants can be read directly against the dense baseline. Runs stop
-at different input lengths, so unmeasured points are written as ``MISSING`` and
-the line simply ends there.
+Every run is drawn as its own line, so the cost of each configuration can be read
+directly against the dense baseline. Runs stop at different input lengths, so a
+gap is written as ``MISSING`` and the line simply ends there.
 
 Both figures are drawn in milliseconds. The harnesses disagree on units, so each
 dataset carries the factor that brings its own times onto that shared axis.
 """
 
 from pathlib import Path
-from typing import TypedDict
 
 import matplotlib.pyplot as plt
 
-from plot_lib import (
-    CONFIG_STYLES, WIDE_FONT_SCALE, finish_plot, format_axes, plot_series, plot_style,
-)
+from plot_lib import WIDE_FONT_SCALE, finish_plot, format_axes, plot_series
+from plot_tables import parse_series, render
 
 
 output_dir = Path(__file__).resolve().parent
 
-# Written where a run was not measured at that input length. Every row must spell
-# out its gaps, otherwise a column would silently shift into another run's name.
-MISSING = "-"
-
-# The nanoGPT harness reports seconds; the Nemotron harness already reports
-# milliseconds. Scaling here keeps each table faithful to its source while the
-# two figures share one axis.
-MS_PER_S = 1000.0
 YLABEL = "Time / ms"
+# Both datasets record whole milliseconds, so integer ticks need no decimal.
+YFORMAT = "{x:,.0f}"
 
-# Each dataset renders one figure. Table headers become series names verbatim,
-# except that underscores are read back as spaces; keeping them single tokens
-# lets a table stay whitespace-separable with its gaps explicit.
+# The nanoGPT harness reports seconds while the Nemotron harness reports
+# milliseconds. Scaling at the point of use keeps each table faithful to its
+# source while the two figures share one axis.
+MS_PER_S = 1000.0
 
-
-class Dataset(TypedDict):
-    """One figure: the x column name, its axis title, and the time-unit factor."""
-
-    x_name: str
-    xlabel: str
-    y_scale: float
-    x_step: float
-    table: str
-
-
-datasets: dict[str, Dataset] = {
+# Each dataset renders one figure. ``x_step`` pins the x ticks, which is what
+# keeps their labels apart once the text is scaled up.
+datasets = {
     "nemotron_time.pdf": {
         "x_name": "N_input",
         "xlabel": "Input tokens",
@@ -93,63 +77,28 @@ Length Base BitSparse Sign-bit Checkpoint
 }
 
 
-def parse_data(table, *, x_name, y_scale):
-    """Return ``(label, x_values, y_values)`` per run, skipping ``MISSING`` cells.
+def plot_time(dataset):
+    """Build one elapsed-time figure and return it without saving it."""
+    series = parse_series(
+        dataset["table"], x_name=dataset["x_name"], y_scale=dataset["y_scale"],
+    )
 
-    Times are multiplied by ``y_scale`` so every dataset lands on the shared axis.
-    """
-    rows = [line.split() for line in table.strip().splitlines() if line.strip()]
-    if len(rows) < 2 or rows[0][0] != x_name:
-        raise ValueError(f"Expected a {x_name} header and at least one data row")
-    headers = rows[0]
-    if len(set(headers)) != len(headers):
-        raise ValueError("Duplicate run names")
-    x_values = {name: [] for name in headers[1:]}
-    y_values = {name: [] for name in headers[1:]}
-    for row_number, row in enumerate(rows[1:], start=2):
-        if len(row) != len(headers):
-            raise ValueError(f"Row {row_number}: expected {len(headers)} values, got {len(row)}")
-        for name, value in zip(headers[1:], row[1:]):
-            if value == MISSING:
-                continue
-            x_values[name].append(float(row[0]))
-            y_values[name].append(float(value.replace(",", "")) * y_scale)
-    return [
-        (name.replace("_", " "), x_values[name], y_values[name])
-        for name in headers[1:]
-    ]
-
-
-def plot_time(table, *, x_name, xlabel, y_scale, x_step):
-    """Build a time/input-length line plot and return it without saving it."""
-    series = parse_data(table, x_name=x_name, y_scale=y_scale)
-    with plot_style(wide=True, font_scale=WIDE_FONT_SCALE):
-        fig, ax = plt.subplots()
-        # One line per configuration. The style carries no linestyle, so each
-        # run draws as a solid line with its own marker.
-        plot_series(ax, series, styles=CONFIG_STYLES)
-        # Times land on whole milliseconds in both datasets, so integer ticks
-        # read cleanly without a decimal point.
-        format_axes(ax, xlabel=xlabel, ylabel=YLABEL, yformat="{x:,.0f}",
-                    x_step=x_step)
-        finish_plot(ax, legend_outside=True)
+    fig, ax = plt.subplots()
+    # One line per configuration, each solid with its own marker.
+    plot_series(ax, series)
+    format_axes(
+        ax, xlabel=dataset["xlabel"], ylabel=YLABEL, yformat=YFORMAT,
+        x_step=dataset["x_step"],
+    )
+    finish_plot(ax, legend_outside=True)
     return fig, ax
 
 
 def main():
-    # Save inside the style context so the configured ``savefig.bbox`` (tight)
-    # and font settings apply; otherwise figures clip at the canvas edges.
-    with plot_style(font_scale=WIDE_FONT_SCALE):
-        for filename, dataset in datasets.items():
-            fig, _ = plot_time(
-                dataset["table"], x_name=dataset["x_name"],
-                xlabel=dataset["xlabel"], y_scale=dataset["y_scale"],
-                x_step=dataset["x_step"],
-            )
-            fig.savefig(output_dir / filename, format="pdf")
-        # Kept inside the context: plt.show redraws, and a redraw under the
-        # default rcParams would size the ticks for the smaller font.
-        plt.show()
+    render(
+        datasets, plot_time, output_dir=output_dir,
+        wide=True, font_scale=WIDE_FONT_SCALE,
+    )
 
 
 if __name__ == "__main__":

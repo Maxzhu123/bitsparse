@@ -1,13 +1,14 @@
-"""Peak backward-pass VRAM against input length for the language-model runs.
+"""Peak VRAM against input length for the language-model runs.
 
 Each dataset is a table of measured peak VRAM, one column per configuration.
 Every run is scattered and overlaid with a least-squares line of best fit, so the
 rate at which activation memory grows with the input length can be compared
-across the dense, sparsified, 15-bit and checkpointed configurations. Runs stop
-at different input lengths, so unmeasured points are written as ``MISSING`` and
-skipped. Every fit is then extrapolated out to the right edge of the plot, so the
-projected growth of each run stays visible without the extrapolation itself
-enlarging either axis.
+across the configurations. Runs stop at different input lengths, so a gap is
+written as ``MISSING`` and the fit spans only what was actually measured.
+
+Each fit is then extrapolated to the right edge of the plot, which keeps the
+projected growth visible without the extrapolation enlarging either axis: the
+axes are sized from the measured points, before any fit is drawn.
 """
 
 from pathlib import Path
@@ -17,23 +18,23 @@ import numpy as np
 from matplotlib.lines import Line2D
 
 from plot_lib import (
-    CONFIG_STYLES, WIDE_FONT_SCALE, finish_plot, format_axes, plot_series, plot_style,
+    CONFIG_STYLES, WIDE_FONT_SCALE, finish_plot, format_axes, plot_series,
 )
+from plot_tables import MIB_PER_GIB, parse_series, render
 
 
 output_dir = Path(__file__).resolve().parent
 
-# ``nemotron.utils.print_max_memory`` and the nanoGPT harness both report MiB;
-# the figures use GiB.
-MIB_PER_GIB = 1024.0
+YLABEL = "Peak VRAM / GiB"
+# The plotted values are the harness readings rounded, so trailing zeros carry
+# no information and are dropped.
+YFORMAT = "{x:,.6g}"
+# Shared by the scattered points and the legend symbols, which must match.
+MARKER_SIZE = 5.5
+MARKER_EDGE_WIDTH = 1.1
 
-# Written where a run was not measured at that input length. Every row must spell
-# out its gaps, otherwise a column would silently shift into another run's name.
-MISSING = "-"
-
-# Each dataset renders one figure. Table headers become series names verbatim,
-# except that underscores are read back as spaces; keeping them single tokens
-# lets a table stay whitespace-separable with its gaps explicit.
+# Each dataset renders one figure. ``x_step`` pins the x ticks, which is what
+# keeps their labels apart once the text is scaled up.
 datasets = {
     "nemotron_mem.pdf": {
         "x_name": "N_input",
@@ -80,132 +81,95 @@ Length Base BitSparse Sign-bit Checkpoint
 }
 
 
-def parse_data(table, *, x_name):
-    """Return ``(label, x_values, y_values)`` per run, skipping ``MISSING`` cells."""
-    rows = [line.split() for line in table.strip().splitlines() if line.strip()]
-    if len(rows) < 2 or rows[0][0] != x_name:
-        raise ValueError(f"Expected a {x_name} header and at least one data row")
-    headers = rows[0]
-    if len(set(headers)) != len(headers):
-        raise ValueError("Duplicate run names")
-
-    x_values = {name: [] for name in headers[1:]}
-    y_values = {name: [] for name in headers[1:]}
-    for row_number, row in enumerate(rows[1:], start=2):
-        if len(row) != len(headers):
-            raise ValueError(f"Row {row_number}: expected {len(headers)} values, got {len(row)}")
-        for name, value in zip(headers[1:], row[1:]):
-            if value == MISSING:
-                continue
-            x_values[name].append(float(row[0]))
-            y_values[name].append(float(value.replace(",", "")))
-
-    return [
-        (name.replace("_", " "), x_values[name], y_values[name])
-        for name in headers[1:]
-    ]
-
-
-def format_fit_equation(slope):
-    """Return a fitted line as a compact ``y = ax + C`` legend label.
+def format_equation(slope):
+    """Return a fitted line as a ``y = ax + C`` label.
 
     The slope is quoted per 1000 input tokens, which keeps its leading digits
-    readable instead of a long run of zeros. Three decimals are kept because
-    the sparsified runs differ by less than that (e.g. nanoGPT's 15-bit packing
-    barely moves the slope), and rounding to two would print identical
-    equations for two different runs. The intercept collapses to ``C``: it
-    only captures the model's fixed footprint, which is the same for every run
-    here and so adds nothing to the comparison.
+    readable instead of a long run of zeros. Three decimals are kept because the
+    optimised runs differ by less than that, so rounding to two would print the
+    same equation for two different runs.
+
+    The intercept collapses to ``C``: it captures the model's fixed footprint,
+    which is much the same for every run and so adds nothing to the comparison.
     """
     return f"$y = {slope * 1000:.3f}x + C$"
 
 
-def plot_fit(ax, x_values, y_values, *, color, x_max):
-    """Overlay a least-squares fit, extrapolated out to ``x_max``.
+def draw_fit(ax, x_values, y_values, *, color, x_max):
+    """Draw a least-squares fit out to ``x_max`` and return its slope.
 
-    The dotted line starts at the run's first measurement and continues to
-    ``x_max``, the right edge of the plot. Beyond the run's own final point the
-    line is therefore an extrapolation of the fitted trend, not measured data,
-    and it is clipped by the axes if the trend leaves the plotted y range.
-    Return the fitted ``(slope, intercept)``.
+    The dotted line starts at the run's first measurement and runs to the right
+    edge of the plot, so beyond the run's final point it is an extrapolation of
+    the fitted trend rather than measured data.
     """
     slope, intercept = np.polyfit(x_values, y_values, 1)
-    x_fit = np.array([min(x_values), x_max], dtype=float)
-    ax.plot(
-        x_fit, slope * x_fit + intercept,
-        color=color, linestyle=":", linewidth=1.4,
+    fit_x = np.array([min(x_values), x_max])
+    ax.plot(fit_x, slope * fit_x + intercept, color=color, linestyle=":",
+            linewidth=1.4)
+    return slope
+
+
+def equation_legend(fits):
+    """Build legend rows pairing each run with the equation of its fit.
+
+    The equation rows carry a blank handle, which indents them under the symbol
+    they belong to.
+    """
+    handles, labels = [], []
+    for name, equation in fits:
+        style = CONFIG_STYLES[name]
+        handles.append(Line2D(
+            [], [], color=style["color"], marker=style["marker"],
+            linestyle="none", markerfacecolor="white",
+            markeredgewidth=MARKER_EDGE_WIDTH, markersize=MARKER_SIZE,
+        ))
+        labels.append(name)
+        handles.append(Line2D([], [], linestyle="none"))
+        labels.append(equation)
+    return handles, labels
+
+
+def plot_mem(dataset):
+    """Build one peak-VRAM figure and return it without saving it."""
+    series = parse_series(
+        dataset["table"], x_name=dataset["x_name"], y_scale=1 / MIB_PER_GIB,
     )
-    return slope, intercept
 
+    fig, ax = plt.subplots()
+    plot_series(
+        ax, series, linestyle="none",
+        markersize=MARKER_SIZE, markeredgewidth=MARKER_EDGE_WIDTH,
+    )
 
-def plot_mem(table, *, x_name, xlabel, x_step):
-    """Build a VRAM/input-length figure and return it without saving it."""
-    # The harnesses report MiB; scale to GiB for a more readable axis.
-    series = [
-        (label, x_values, [vram / MIB_PER_GIB for vram in y_values])
-        for label, x_values, y_values in parse_data(table, x_name=x_name)
+    # The measured points alone decide the axes' extent. Capturing it here lets
+    # the fits reach the right edge while their extrapolated values stay out of
+    # the autoscaling, so the range reflects only what was measured.
+    x_limits = ax.get_xlim()
+    y_limits = ax.get_ylim()
+
+    fits = [
+        (name, format_equation(draw_fit(
+            ax, x_values, y_values, color=CONFIG_STYLES[name]["color"],
+            x_max=x_limits[1],
+        )))
+        for name, x_values, y_values in series
     ]
-    with plot_style(wide=True, font_scale=WIDE_FONT_SCALE):
-        fig, ax = plt.subplots()
-        plot_series(
-            ax, series, styles=CONFIG_STYLES, linestyle="none",
-            markersize=5.5, markeredgewidth=1.1,
-        )
-        # The measured points alone decide the axes' extent. Capturing it here
-        # lets the fits run out to the plot's right edge while the extrapolated
-        # values stay out of the autoscaling, so the y range reflects only what
-        # was actually measured.
-        x_limits = ax.get_xlim()
-        y_limits = ax.get_ylim()
-        # One dotted fit per run, drawn to the same right edge. Each fit is kept
-        # with its run's name so the legend can show the equation under that
-        # run's symbol.
-        fits = []
-        for name, x_values, y_values in series:
-            slope, _ = plot_fit(
-                ax, x_values, y_values, color=CONFIG_STYLES[name]["color"],
-                x_max=x_limits[1],
-            )
-            fits.append((name, format_fit_equation(slope)))
-        format_axes(
-            ax, xlabel=xlabel, ylabel="Peak VRAM / GiB", yformat="{x:,.6g}", x_step=x_step,
-        )
-        ax.set_xlim(*x_limits)
-        ax.set_ylim(*y_limits)
-        # Build the legend by hand so each equation gets a row of its own
-        # beneath its run's symbol. Those rows carry a blank handle, which
-        # indents them under the symbol they belong to.
-        legend_handles, legend_labels = [], []
-        for name, equation in fits:
-            style = CONFIG_STYLES[name]
-            legend_handles.append(Line2D(
-                [], [], color=style["color"], marker=style["marker"],
-                linestyle="none", markerfacecolor="white",
-                markeredgewidth=1.1, markersize=5.5,
-            ))
-            legend_labels.append(name)
-            legend_handles.append(Line2D([], [], linestyle="none"))
-            legend_labels.append(equation)
-        finish_plot(
-            ax, legend_outside=True,
-            legend_entries=(legend_handles, legend_labels),
-        )
+
+    format_axes(
+        ax, xlabel=dataset["xlabel"], ylabel=YLABEL, yformat=YFORMAT,
+        x_step=dataset["x_step"],
+    )
+    ax.set_xlim(*x_limits)
+    ax.set_ylim(*y_limits)
+    finish_plot(ax, legend_outside=True, legend_entries=equation_legend(fits))
     return fig, ax
 
 
 def main():
-    # Save inside the style context so the configured ``savefig.bbox`` (tight)
-    # and font settings apply; otherwise figures clip at the canvas edges.
-    with plot_style(font_scale=WIDE_FONT_SCALE):
-        for filename, dataset in datasets.items():
-            fig, _ = plot_mem(
-                dataset["table"], x_name=dataset["x_name"], xlabel=dataset["xlabel"],
-                x_step=dataset["x_step"],
-            )
-            fig.savefig(output_dir / filename, format="pdf")
-        # Kept inside the context: plt.show redraws, and a redraw under the
-        # default rcParams would size the ticks for the smaller font.
-        plt.show()
+    render(
+        datasets, plot_mem, output_dir=output_dir,
+        wide=True, font_scale=WIDE_FONT_SCALE,
+    )
 
 
 if __name__ == "__main__":
