@@ -1,4 +1,4 @@
-"""Plot each layer's average and least-sparse density during training.
+"""Plot each layer's mean and minimum zero fraction during training.
 
 The table names one column per layer and metric, so the layers are read back out
 of the column names and are coloured as an ordered series: the colour tracks
@@ -43,6 +43,8 @@ def group_layers(table):
 
     The columns arrive in one flat row, so each is matched against
     :data:`COLUMN` to recover the layer it belongs to and the metric it carries.
+    The source measurements are nonzero fractions despite their column names:
+    complementing them gives mean sparsity and minimum sparsity, respectively.
     """
     steps, layers = None, {}
     for name, x_values, y_values in parse_series(table, x_name=X_NAME):
@@ -51,7 +53,7 @@ def group_layers(table):
             raise ValueError(f"unexpected metric column: {name!r}")
         layer, metric = match.groups()
         steps = x_values
-        layers.setdefault(int(layer), {})[metric] = y_values
+        layers.setdefault(int(layer), {})[metric] = [1.0 - value for value in y_values]
     return steps, dict(sorted(layers.items()))
 
 
