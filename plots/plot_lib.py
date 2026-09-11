@@ -8,6 +8,10 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import StrMethodFormatter
 
 
+# Distance between tick marks and their numbers, in points. The matplotlib
+# default leaves them almost touching.
+TICK_PAD = 7.0
+
 PLOT_PARAMS = {
     "figure.figsize": (5.5, 3.4),
     "figure.dpi": 150,
@@ -38,6 +42,10 @@ PLOT_PARAMS = {
     "lines.markersize": 4.5,
     "xtick.labelsize": 11,
     "ytick.labelsize": 11,
+    # The default tick padding is half the tick-mark length, which leaves the
+    # numbers touching the marks. This gives them clearance.
+    "xtick.major.pad": TICK_PAD,
+    "ytick.major.pad": TICK_PAD,
     "legend.fontsize": 11,
     "legend.title_fontsize": 12,
     "legend.frameon": False,
@@ -57,6 +65,32 @@ WIDE_FIGURE_SIZE = (8, 4.5)
 LINE_STYLES = ("-", "--", "-.", ":")
 NEUTRAL_COLOR = "#333333"
 LAYOUT_PAD = 0.5
+# A legend placed beside the axes needs a wider margin than the plot alone,
+# otherwise its right-hand text ends up hard against the figure edge and gets
+# clipped as soon as the labels grow.
+LEGEND_LAYOUT_PAD = 1.0
+
+# Comparison figures with a dense baseline plus three optimised variants need a
+# fourth style, so the sparsified runs extend the neutral baseline with
+# Okabe-Ito hues, which stay distinct for colorblind readers. Callers choose the
+# linestyle, so the same styles serve both scatter and line plots.
+CONFIG_SERIES_STYLES = (
+    {"color": NEUTRAL_COLOR, "marker": "o"},
+    {"color": "#0072B2", "marker": "s"},
+    {"color": "#D55E00", "marker": "^"},
+    {"color": "#009E73", "marker": "D"},
+)
+
+# Legends are kept tight so they read as attached to their plot: a short
+# handle keeps each symbol close to its label instead of centring it in a wide
+# empty box, and trimming the padding stops blank space from inflating the
+# legend. The handle length also sets how far a companion row, such as a
+# fitted equation, is indented under the row above it.
+LEGEND_HANDLE_LENGTH = 1.0
+LEGEND_HANDLE_TEXT_PAD = 0.3
+LEGEND_BORDER_PAD = 0.3
+# How far a legend placed beside the axes sits from them, as an axes fraction.
+LEGEND_SIDE_ANCHOR = 1.005
 
 # Ordered groups (e.g. network layers) walk the hue wheel from red to violet,
 # so the color advances with the group's index. The walk deliberately stops
@@ -197,26 +231,46 @@ def format_axes(ax, *, xlabel, ylabel, xformat="{x:,.0f}", yformat=None):
             axis.set_major_formatter(StrMethodFormatter(pattern))
 
 
-def finish_plot(ax, *, group_handles=None, metric_handles=None, group_title=None):
+def finish_plot(ax, *, group_handles=None, metric_handles=None, group_title=None,
+                legend_outside=False, legend_entries=None):
     """Apply shared legend placement and layout to an axes' figure.
 
-    Ordinary series use an inside legend. Grouped series use a vertical legend
-    and an optional metric key in reserved space on the right; pair this layout
-    with ``plot_style(wide=True)``.
+    Ordinary series use an inside legend, or one beside the axes when
+    ``legend_outside`` is set; pair that with ``plot_style(wide=True)`` so the
+    legend has room. ``legend_entries`` supplies an explicit ``(handles,
+    labels)`` pair for legends whose rows are not all plotted artists, such as
+    one annotating each series with an extra line of text. Grouped series use a
+    vertical legend and an optional metric key in reserved space on the right.
+
+    Every legend shares the same tight row spacing, so a symbol sits close to
+    its label and a legend beside the axes hugs the plot.
     """
+    spacing = {"borderpad": LEGEND_BORDER_PAD, "handlelength": LEGEND_HANDLE_LENGTH,
+               "handletextpad": LEGEND_HANDLE_TEXT_PAD}
+    # A legend beside the axes needs the wider margin; an inside one does not.
+    layout_pad = LEGEND_LAYOUT_PAD if (legend_outside or group_handles) else LAYOUT_PAD
     if group_handles is None:
-        ax.legend(loc="best", borderaxespad=1.0)
-        ax.figure.tight_layout(pad=LAYOUT_PAD)
+        if legend_outside:
+            options = {"loc": "center left",
+                       "bbox_to_anchor": (LEGEND_SIDE_ANCHOR, 0.5),
+                       "borderaxespad": 0, **spacing}
+        else:
+            options = {"loc": "best", "borderaxespad": 1.0, **spacing}
+        if legend_entries is None:
+            ax.legend(**options)
+        else:
+            ax.legend(*legend_entries, **options)
+        ax.figure.tight_layout(pad=layout_pad)
         return
 
     legend = ax.legend(
         handles=group_handles, title=group_title, loc="upper left",
-        bbox_to_anchor=(1.02, 1), ncol=1, borderaxespad=0,
+        bbox_to_anchor=(LEGEND_SIDE_ANCHOR, 1), ncol=1, borderaxespad=0, **spacing,
     )
     if metric_handles is not None:
         ax.add_artist(legend)
         ax.legend(
             handles=metric_handles, loc="lower left",
-            bbox_to_anchor=(1.02, 0), borderaxespad=0,
+            bbox_to_anchor=(LEGEND_SIDE_ANCHOR, 0), borderaxespad=0, **spacing,
         )
-    ax.figure.tight_layout(pad=LAYOUT_PAD)
+    ax.figure.tight_layout(pad=layout_pad)
