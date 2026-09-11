@@ -1,9 +1,9 @@
-"""Peak VRAM against input length for the language-model runs.
+"""Peak VRAM against sequence length for the language-model runs.
 
 Each dataset is a table of measured peak VRAM, one column per configuration.
 Every run is scattered and overlaid with a least-squares line of best fit, so the
-rate at which activation memory grows with the input length can be compared
-across the configurations. Runs stop at different input lengths, so a gap is
+rate at which activation memory grows with the sequence length can be compared
+across the configurations. Runs stop at different sequence lengths, so a gap is
 written as ``MISSING`` and the fit spans only what was actually measured.
 
 Each fit is then extrapolated to the right edge of the plot, which keeps the
@@ -37,11 +37,11 @@ MARKER_EDGE_WIDTH = 1.1
 # keeps their labels apart once the text is scaled up.
 datasets = {
     "nemotron_mem.pdf": {
-        "x_name": "N_input",
-        "xlabel": "Input tokens",
+        "x_name": "Length",
+        "xlabel": "Sequence length",
         "x_step": 1000.0,
         "table": """
-N_input Base BitSparse Sign-bit Checkpoint
+Length Base BitSparse Sign-bit Checkpoint
 50 16750 16660 16660 16652
 100 17010 16828 16828 16813
 200 17528 17165 17165 17135

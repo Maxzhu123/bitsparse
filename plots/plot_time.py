@@ -1,9 +1,9 @@
-"""Wall-clock time against input length for the language-model runs.
+"""Wall-clock time against sequence length for the language-model runs.
 
 Each dataset is a table of measured step times, one column per configuration.
 Every run is drawn as its own line, so the cost of each configuration can be read
-directly against the dense baseline. Runs stop at different input lengths, so a
-gap is written as ``MISSING`` and the line simply ends there.
+directly against the dense baseline. Runs stop at different sequence lengths, so
+a gap is written as ``MISSING`` and the line simply ends there.
 
 Both figures are drawn in milliseconds. The harnesses disagree on units, so each
 dataset carries the factor that brings its own times onto that shared axis.
@@ -32,12 +32,12 @@ MS_PER_S = 1000.0
 # keeps their labels apart once the text is scaled up.
 datasets = {
     "nemotron_time.pdf": {
-        "x_name": "N_input",
-        "xlabel": "Input tokens",
+        "x_name": "Length",
+        "xlabel": "Sequence length",
         "y_scale": 1.0,
         "x_step": 1000.0,
         "table": """
-N_input Base BitSparse Sign-bit Checkpoint
+Length Base BitSparse Sign-bit Checkpoint
 50 185 185 198 197
 100 187 185 202 200
 200 186 186 203 198
