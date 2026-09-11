@@ -24,7 +24,7 @@ layers	vram	avg_time	vram	avg_time	vram	avg_time
 7	7990.9	2107.5	9112.4	1796.7	9044.1	1808.3
 8	8241.0	2153.1	7268.6	1797.6	7200.4	1809.7"""
 
-save_filename = Path(__file__).resolve().with_name("pareto_vram_time.pdf")
+save_filename = Path(__file__).resolve().with_name("relu2_80_sparse_pareto.pdf")
 
 
 def parse_data(table):
