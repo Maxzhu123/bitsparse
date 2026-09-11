@@ -86,11 +86,8 @@ LINE_STYLES = ("-", "--", "-.", ":")
 # --------------------------------------------------------------------------- #
 
 WIDE_FIGURE_SIZE = (8, 4.5)
+# Margin between the figure edge and the axes, as a fraction of the font size.
 LAYOUT_PAD = 0.5
-# A legend placed beside the axes needs a wider margin than the plot alone,
-# otherwise its right-hand text ends up hard against the figure edge and is
-# clipped as soon as the labels grow.
-LEGEND_LAYOUT_PAD = 1.0
 
 # Point sizes on the rcParams that carry text, which plot_style scales together.
 FONT_KEYS = (
@@ -291,8 +288,6 @@ def finish_plot(ax, *, group_handles=None, metric_handles=None, group_title=None
         "handlelength": LEGEND_HANDLE_LENGTH,
         "handletextpad": LEGEND_HANDLE_TEXT_PAD,
     }
-    # A legend beside the axes needs the wider margin; an inside one does not.
-    layout_pad = LEGEND_LAYOUT_PAD if (legend_outside or group_handles) else LAYOUT_PAD
 
     if group_handles is None:
         if legend_outside:
@@ -309,7 +304,7 @@ def finish_plot(ax, *, group_handles=None, metric_handles=None, group_title=None
             ax.legend(**options)
         else:
             ax.legend(*legend_entries, **options)
-        ax.figure.tight_layout(pad=layout_pad)
+        ax.figure.tight_layout(pad=LAYOUT_PAD)
         return
 
     legend = ax.legend(
@@ -322,4 +317,4 @@ def finish_plot(ax, *, group_handles=None, metric_handles=None, group_title=None
             handles=metric_handles, loc="lower left",
             bbox_to_anchor=(LEGEND_SIDE_ANCHOR, 0), borderaxespad=0, **spacing,
         )
-    ax.figure.tight_layout(pad=layout_pad)
+    ax.figure.tight_layout(pad=LAYOUT_PAD)
