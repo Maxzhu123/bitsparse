@@ -92,12 +92,12 @@ if __name__ == "__main__":
     # Evaluate relu blocks
     print(":"*75)
     print("Running with Relu")
-    for sp in range(9):
+    for sp in range(exp.LAYERS+1):
         print(f'{sp = }')
         run_batch(FFNReluModel, sp_blocks=sp, warmup_steps=1, eval_steps=3, batch_sizes=[16000], save_name="./results/relu_sparse_layers.csv")
     print(":" * 75)
     print("Running with Relu2")
-    for sp in range(9):
+    for sp in range(exp.LAYERS+1):
         print(f'{sp = }')
         run_batch(FFNRelu2Model, sp_blocks=sp, warmup_steps=1, eval_steps=3, batch_sizes=[16000], save_name="./results/relu2_sparse_layers.csv")
 
