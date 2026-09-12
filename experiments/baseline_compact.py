@@ -277,6 +277,27 @@ def main():
 
     ratios = [2, 4, 8]
 
+    print("Running relu")
+    for r in ratios:
+        print(f'{"=" * 20} {r=}')
+        model = FFNCompAct(4096, 8, r).cuda().to(torch.bfloat16)
+        setup_hooks(model)
+        x = torch.randn(bs, 4096, device="cuda", dtype=torch.bfloat16)
+
+        with open(f"./results/relu_compact.csv", "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "method", "vram", "avg_time",
+            ])
+
+            for _ in range(5):
+                run_test(x, model, 1, relu2=False)
+                time, vram = run_test(x, model, 2, relu2=False)
+                print(f'{time=}, {vram=}')
+                writer.writerow([f"compact_{r}", vram, time])
+                f.flush()
+
+    print("Running Relu2")
     for r in ratios:
         print(f'{"=" * 20} {r=}')
         model = FFNCompAct(4096, 8, r).cuda().to(torch.bfloat16)
