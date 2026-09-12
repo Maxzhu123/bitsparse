@@ -39,8 +39,8 @@ class _RMSNormFp8Linear(Function):
 
 def rms_linear(x, weight):
     if USE_FP8:
-        return _RMSNormFp8Linear.apply(x, weight)
-    return FusedRMSNormMLP.apply(x, weight, None, torch.finfo(torch.float32).eps).clone()
+        return _RMSNormFp8Linear.apply(x, weight).clone()
+    return FusedRMSNormMLP.apply(x, weight, None, torch.finfo(torch.float32).eps)
 
 
 class Compressor:
