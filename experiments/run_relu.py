@@ -104,11 +104,11 @@ if __name__ == "__main__":
 
     exp.DATA_SPARSITY =  "Normal"
     c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
-    run_layers(FFNReluModel, bs=16_000, save_name="relu_normal_fp8.csv")
-    run_layers(FFNRelu2Model, bs=16_000, save_name="relu2_normal_fp8.csv")
+    run_batch(FFNReluModel, sp_blocks=99,  batch_sizes=[16_000], warmup_steps=1, eval_steps=3, save_name="relu_normal_fp8.csv")
+    run_batch(FFNRelu2Model, sp_blocks=99, batch_sizes=[16_000], warmup_steps=1, eval_steps=3, save_name="relu2_normal_fp8.csv")
 
     exp.DATA_SPARSITY =  "Sparse" #"Sparse"
     c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
-    run_layers(FFNReluModel, bs=16_000, save_name="relu_sparse_fp8.csv")
-    run_layers(FFNRelu2Model, bs=16_000, save_name="relu2_sparse_fp8.csv")
+    run_batch(FFNReluModel, sp_blocks=99, batch_sizes=[16_000], warmup_steps=1, eval_steps=3, save_name="relu_sparse_fp8.csv")
+    run_batch(FFNRelu2Model, sp_blocks=99, batch_sizes=[16_000], warmup_steps=1, eval_steps=3, save_name="relu2_sparse_fp8.csv")
 
