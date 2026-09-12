@@ -103,6 +103,7 @@ def evaluate_checkpoint(
     seq_len: int,
     sequences_per_batch: int,
     eval_steps: int,
+    cfg_dict: dict[str, bool],
 ) -> dict[str, float | int]:
     print(f"checkpoint: {checkpoint_path}")
 
@@ -111,7 +112,7 @@ def evaluate_checkpoint(
     model = GPT(
         vocab_size=vocab_size,
         num_layers=num_layers,
-        model_dim=model_dim, cfg={"bitsparse": False, "pack_sbit": False, "checkpoint": False},
+        model_dim=model_dim, cfg=cfg_dict,
     )
     model.load_state_dict(state_dict)
     model.cuda()
@@ -138,10 +139,13 @@ def evaluate_checkpoint(
 
 
 def main() -> None:
+    cfg_dict = {"bitsparse": True, "pack_sbit": True, "checkpoint": False}
+
     checkpoint = Path("~/Documents/bitsparse/nanogpt/logs/2026-07-04_00-06-23/3300.pt").expanduser()
     print(f"data: {DATA_ROOT / DATA_PATTERN}")
-    RESULTS_PATH = LOG_DIR / "normal.csv"
+    RESULTS_PATH = LOG_DIR / "compressed_sbit.csv"
     results_file_exists = RESULTS_PATH.exists()
+    print(f"results: {RESULTS_PATH}")
 
     sequence_lengths = [256, 512, 1024, 2048, 4096, 8192, 12000, 16384]
     with RESULTS_PATH.open("a", newline="") as file:
@@ -151,7 +155,7 @@ def main() -> None:
                 checkpoint,
                 seq_len,
                 SEQUENCES_PER_BATCH,
-                EVAL_STEPS,
+                EVAL_STEPS, cfg_dict
             )
             if writer is None:
                 writer = csv.DictWriter(file, fieldnames=result.keys())
@@ -159,7 +163,6 @@ def main() -> None:
                     writer.writeheader()
             writer.writerow(result)
             file.flush()
-    print(f"results: {RESULTS_PATH}")
 
 
 if __name__ == "__main__":

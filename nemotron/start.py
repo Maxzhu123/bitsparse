@@ -19,7 +19,6 @@ with open(os.path.join(current_dir, "sample_text.txt"), "r") as f:
 
 def setup_hooks(model):
     def hook(w):
-        # print(w.grad.norm())
         w.grad = None
         return
 
@@ -49,15 +48,8 @@ def calculate_loss(model: NemotronHForCausalLM, text, tokenizer, device, max_tok
 
 def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
     model.train()
+    sparse_data = model.config.sparse_data
 
-    model.config.sparse_ffn = False
-    model.config.use_ckpt = True
-    # sparse_data = TensorBuffer(60_000_000)
-    sparse_data = None
-    model.config.pack_sbit = False
-    model.config.sparse_data = sparse_data
-
-    c_print(f'{train_tokens=}, sparse={model.config.sparse_ffn}', color="bright_yellow")
 
     # Warmup
     # c_print("Starting Warmup", color="cyan")
@@ -72,7 +64,7 @@ def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
     # c_print("Starting Timing Run", color="cyan")
     torch.cuda.synchronize()
     st = time.perf_counter()
-    for _ in range(10):
+    for _ in range(5):
         if sparse_data is not None:
             sparse_data.reset_buffer()
         loss = calculate_loss(model, prompt, tokenizer, device, max_tokens=train_tokens)
@@ -118,24 +110,32 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model: NemotronHForCausalLM = NemotronHForCausalLM.from_pretrained(
-        MODEL_NAME, dtype=dtype, trust_remote_code=True, use_kernels=True
+        MODEL_NAME, dtype=dtype, trust_remote_code=True
     ).to(device)
     setup_hooks(model)
 
+    model.config.sparse_ffn = True
+    model.config.use_ckpt = False
+    # sparse_data = TensorBuffer(60_000_000)
+    sparse_data = None
+    model.config.pack_sbit = False
+    model.config.sparse_data = sparse_data
 
-    with open("./checkpoint.csv", "a", newline="") as f:
+
+    with open(f"./results/sparse_{model.config.sparse_ffn}_sbit_{model.config.pack_sbit}.csv",
+              "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["num_tokens", "vram", "time"])
         # token_sizes = [1100]
         token_sizes = [50, 100, 200, 300, 400, 500, 700, 900, 1100, 1300, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000, 6500, 7000]
         for train_tokens in token_sizes:
+            c_print(f'{train_tokens=}, sparse={model.config.sparse_ffn}', color="bright_yellow")
+
             time, vram = run_tests(model, tokenizer, device, train_tokens)
             writer.writerow([train_tokens, vram, time])
             f.flush()
-
-
-
-    # train_tokens = 500
+    #
+    # train_tokens = 400
     # run_tests(model, tokenizer, device, train_tokens)
 
 

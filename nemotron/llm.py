@@ -17,7 +17,7 @@ from huggingface_hub.dataclasses import strict
 
 from transformers.configuration_utils import PreTrainedConfig
 from transformers.utils import logging
-from lib_sparse.layers import FFNRelu2
+from lib_sparse.layers import FusedRMSNormMLP, RMSFFNRelu2
 from lib_sparse.bitsparse import TensorBuffer
 logger = logging.get_logger(__name__)
 
@@ -75,6 +75,9 @@ class NemotronHConfig(PreTrainedConfig):
     use_ckpt: bool = False
     sparse_data: TensorBuffer | None = None
     pack_sbit: bool = False
+    fuse_norm_projections: bool = True
+    use_chunked_loss: bool = True
+    loss_chunk_size: int = 32
 
     def __post_init__(self, **kwargs):
         # Backward compatibility; configs expect different names for these fields when init
@@ -378,6 +381,7 @@ class NemotronHMamba2Mixer(nn.Module):
         hidden_states: torch.Tensor,
         cache_params: Cache | None = None,
         attention_mask: torch.Tensor | None = None,
+        input_norm=None,
     ):
         # set up dimensions for reshapes later
 
@@ -439,7 +443,10 @@ class NemotronHMamba2Mixer(nn.Module):
                 dtype = hidden_states.dtype
                 hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
             # 1. Gated MLP's linear projection
-            projected_states = self.in_proj(hidden_states)
+            projected_states = (
+                input_norm.forward_linear(hidden_states, self.in_proj)
+                if input_norm is not None else self.in_proj(hidden_states)
+            )
             A = -torch.exp(self.A_log.float())  # (num_heads) or (intermediate_size, state_size)
             dt_limit_kwargs = {} if self.time_step_limit is None else {"dt_limit": self.time_step_limit}
             if attention_mask is not None:
@@ -730,6 +737,7 @@ class NemotronHMamba2Mixer(nn.Module):
         hidden_states,
         cache_params: Cache | None = None,
         attention_mask: torch.Tensor | None = None,
+        input_norm=None,
         **kwargs,
     ):
         if is_fast_path_available and "cuda" in self.in_proj.weight.device.type and not is_torchdynamo_compiling():
@@ -737,8 +745,10 @@ class NemotronHMamba2Mixer(nn.Module):
             # Mamba might launch on the default cuda stream that not strictly respect the current Pytorch cuda stream.
             # This leads to kernel reading uninitialized memory before the data transfer is complete.
             with torch.cuda.stream(torch.cuda.default_stream(hidden_states.device)):
-                return self.cuda_kernels_forward(hidden_states, cache_params, attention_mask)
+                return self.cuda_kernels_forward(hidden_states, cache_params, attention_mask, input_norm)
 
+        if input_norm is not None:
+            hidden_states = input_norm(hidden_states)
         return self.torch_forward(hidden_states, cache_params, attention_mask)
 
 
@@ -753,14 +763,52 @@ class NemotronHRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        if not hidden_states.is_cuda:
+            raise ValueError("NemotronHRMSNorm requires CUDA tensors.")
+
+        from mamba_ssm.ops.triton.layer_norm import rms_norm_fn
+
+        # Save the input and RMS statistics; recompute normalized values in backward.
+        return rms_norm_fn(hidden_states, self.weight, None, eps=self.variance_epsilon)
+
+    def forward_linear(self, hidden_states: torch.Tensor, linear: nn.Linear) -> torch.Tensor:
+        if not hidden_states.is_cuda:
+            raise ValueError("NemotronHRMSNorm requires CUDA tensors.")
+
+        from mamba_ssm.ops.triton.layer_norm import layer_norm_linear_fn
+
+        # The projection's normalized input is reconstructed during backward.
+        return layer_norm_linear_fn(
+            hidden_states, self.weight, None, linear.weight, linear.bias,
+            eps=self.variance_epsilon, is_rms_norm=True,
+        )
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+
+
+class _DenseRelu2Linear(torch.autograd.Function):
+    """ReLU² and down projection from FFNRelu2_2, retaining only relu(z)."""
+
+    @staticmethod
+    def forward(ctx, z, down_weight, down_bias):
+        if not z.is_cuda:
+            raise ValueError("Nemotron dense FFN requires CUDA tensors.")
+        r = z.relu()
+        ctx.save_for_backward(down_weight, r)
+        return torch.nn.functional.linear(r.square(), down_weight, down_bias)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        down_weight, r = ctx.saved_tensors
+        input_shape = r.shape
+        r = r.reshape(-1, r.shape[-1])
+        grad_output = grad_output.reshape(-1, down_weight.shape[0])
+        needs = ctx.needs_input_grad
+        grad_down = grad_output.T @ r.square() if needs[1] else None
+        grad_down_bias = grad_output.sum(0) if needs[2] else None
+        grad_z = ((grad_output @ down_weight) * (2 * r)).reshape(input_shape) if needs[0] else None
+        return grad_z, grad_down, grad_down_bias
 
 
 class NemotronHMLP(nn.Module):
@@ -771,24 +819,23 @@ class NemotronHMLP(nn.Module):
         self.intermediate_size = intermediate_size or config.intermediate_size
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
-        self.act_fn = ACT2FN[config.mlp_hidden_act]
 
-    # @torch.compile()
-    def _forward_ffn(self, x):
-        h = self.act_fn(self.up_proj(x))
-        return self.down_proj(h)
+    def _forward_ffn(self, x, input_norm: NemotronHRMSNorm):
+        z = FusedRMSNormMLP.apply(
+            x, self.up_proj.weight, input_norm.weight, input_norm.variance_epsilon,
+        )
+        return _DenseRelu2Linear.apply(z, self.down_proj.weight, self.down_proj.bias)
 
-    def forward(self, x):
+    def forward(self, x, input_norm: NemotronHRMSNorm):
         if self.config.sparse_ffn:
-            W1 = self.up_proj.weight
-            W2 = self.down_proj.weight
-            out = FFNRelu2.apply(x, W1, W2, sparse_data=self.config.sparse_data, pack_sbit=self.config.pack_sbit)
-            return out
-        else:
-            if self.config.use_ckpt:
-                return torch.utils.checkpoint.checkpoint(self._forward_ffn, x, use_reentrant=False)
-            else:
-                return self._forward_ffn(x)
+            return RMSFFNRelu2.apply(
+                x, self.up_proj.weight, self.down_proj.weight, input_norm.weight,
+                eps=input_norm.variance_epsilon, sparse_data=self.config.sparse_data,
+                pack_sbit=self.config.pack_sbit,
+            )
+        if self.config.use_ckpt:
+            return torch.utils.checkpoint.checkpoint(self._forward_ffn, x, input_norm, use_reentrant=False)
+        return self._forward_ffn(x, input_norm)
 
 
 def rotate_half(x):
@@ -884,14 +931,22 @@ class NemotronHAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | None = None,
+        input_norm: NemotronHRMSNorm | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        def project(linear):
+            return (
+                input_norm.forward_linear(hidden_states, linear)
+                if input_norm is not None else linear(hidden_states)
+            ).view(hidden_shape).transpose(1, 2)
+
+        # Separate calls share raw input storage without allocating concatenated weights.
+        query_states = project(self.q_proj)
+        key_states = project(self.k_proj)
+        value_states = project(self.v_proj)
 
         if past_key_values is not None:
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
@@ -958,10 +1013,25 @@ class NemotronHBlock(GradientCheckpointingLayer):
         **kwargs: Unpack[TransformersKwargs],
     ):
         residual = hidden_states
-        hidden_states = self.norm(hidden_states.to(dtype=self.norm.weight.dtype))
+        hidden_states = hidden_states.to(dtype=self.norm.weight.dtype)
+        fuse_norm = self.block_type == "mlp" or (
+            self.config.fuse_norm_projections and (
+                self.block_type == "attention"
+                or (
+                    self.block_type == "mamba" and self.training
+                    and past_key_values is None and attention_mask is None
+                )
+            )
+        )
+        input_norm = self.norm if fuse_norm else None
+        if input_norm is None:
+            hidden_states = self.norm(hidden_states)
 
         if self.block_type == "mamba":
-            hidden_states = self.mixer(hidden_states, cache_params=past_key_values, attention_mask=attention_mask)
+            hidden_states = self.mixer(
+                hidden_states, cache_params=past_key_values,
+                attention_mask=attention_mask, input_norm=input_norm,
+            )
         elif self.block_type == "attention":
             hidden_states, _ = self.mixer(
                 hidden_states=hidden_states,
@@ -969,10 +1039,11 @@ class NemotronHBlock(GradientCheckpointingLayer):
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 use_cache=use_cache,
+                input_norm=input_norm,
                 **kwargs,
             )
         else:
-            hidden_states = self.mixer(hidden_states)
+            hidden_states = self.mixer(hidden_states, input_norm=input_norm)
 
         hidden_states = residual + hidden_states
 
@@ -1078,6 +1149,7 @@ class NemotronHModel(NemotronHPreTrainedModel):
         past_key_values: Cache | None = None,
         use_cache: bool | None = None,
         attention_mask: torch.Tensor | None = None,
+        _apply_final_norm: bool = True,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | BaseModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):  # ^ is python for xor
@@ -1124,7 +1196,8 @@ class NemotronHModel(NemotronHPreTrainedModel):
                 **kwargs,
             )
 
-        hidden_states = self.norm_f(hidden_states)
+        if _apply_final_norm:
+            hidden_states = self.norm_f(hidden_states)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -1143,6 +1216,61 @@ class NemotronHModel(NemotronHPreTrainedModel):
         ):
             mamba_mask = None
         return mamba_mask
+
+
+def _chunked_linear_loss(hidden_states, weight, targets, denominator, ignore_index, chunk_size):
+    """Loss-only linear/CE path; recompute chunk gradients instead of saving vocabulary logits."""
+    if not hidden_states.is_cuda:
+        raise ValueError("Nemotron chunked loss requires CUDA tensors.")
+
+    options = torch.nn.LinearCrossEntropyOptions(
+        batch_chunk_size=chunk_size, chunking_method=None,
+        acc_policy="compact", acc_dtype=torch.float32,
+    )
+    per_token = torch.nn.functional.linear_cross_entropy(
+        hidden_states.reshape(-1, hidden_states.shape[-1]), weight, targets.reshape(-1),
+        ignore_index=ignore_index, reduction="none", options=options,
+    )
+    # The backend returns per-token losses in the input dtype. Reduce in FP32.
+    total = per_token.float().sum()
+    if denominator is not None:
+        return total / denominator
+    count = (targets != ignore_index).sum()
+    # Match cross_entropy's NaN loss and zero gradients for an entirely ignored batch.
+    return torch.where(count > 0, total / count.clamp_min(1), total.new_full((), float("nan")))
+
+
+class _RMSNormLinearLoss(torch.autograd.Function):
+    """Keep raw final hidden states; reconstruct normalization and chunked loss in backward."""
+
+    @staticmethod
+    def forward(ctx, hidden_states, norm_weight, weight, targets, denominator, eps, ignore_index, chunk_size):
+        from mamba_ssm.ops.triton.layer_norm import rms_norm_fn
+
+        ctx.save_for_backward(hidden_states, norm_weight, weight, targets, denominator)
+        ctx.eps, ctx.ignore_index, ctx.chunk_size = eps, ignore_index, chunk_size
+        normalized = rms_norm_fn(hidden_states, norm_weight, None, eps=eps)
+        return _chunked_linear_loss(normalized, weight, targets, denominator, ignore_index, chunk_size)
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx, grad_output):
+        from mamba_ssm.ops.triton.layer_norm import rms_norm_fn
+
+        hidden_states, norm_weight, weight, targets, denominator = ctx.saved_tensors
+        with torch.enable_grad():
+            inputs = [
+                value.detach().requires_grad_(needed)
+                for value, needed in zip((hidden_states, norm_weight, weight), ctx.needs_input_grad[:3])
+            ]
+            normalized = rms_norm_fn(inputs[0], inputs[1], None, eps=ctx.eps)
+            loss = _chunked_linear_loss(
+                normalized, inputs[2], targets, denominator, ctx.ignore_index, ctx.chunk_size,
+            )
+            required = [value for value in inputs if value.requires_grad]
+            gradients = iter(torch.autograd.grad(loss, required, grad_output))
+        result = [next(gradients) if value.requires_grad else None for value in inputs]
+        return (*result, None, None, None, None, None)
 
 
 # Adapted from transformers.models.jamba.modeling_jamba.JambaForCausalLM with Jamba->NemotronH, JAMBA->NEMOTRON_H
@@ -1173,9 +1301,13 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
         logits_to_keep: int | torch.Tensor = 0,
+        return_logits: bool | None = None,
         **kwargs,
     ) -> tuple | CausalLMOutputWithPast:
         r"""
+        With labels in training mode, the default chunked path returns loss without logits.
+        Pass `return_logits=True` to compute full logits and the standard loss instead.
+
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
             config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
@@ -1197,6 +1329,22 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
+        if return_logits is None:
+            return_logits = labels is None or not self.training or not self.config.use_chunked_loss
+        if not return_logits and labels is None:
+            raise ValueError("return_logits=False requires labels.")
+        if not return_logits and (not isinstance(logits_to_keep, int) or logits_to_keep != 0):
+            raise ValueError("Loss-only training requires logits_to_keep=0.")
+
+        output_hidden_states = kwargs.get("output_hidden_states")
+        if output_hidden_states is None:
+            output_hidden_states = getattr(self.config, "output_hidden_states", False)
+        fuse_final_norm = self.config.fuse_norm_projections and not output_hidden_states
+        loss_kwargs = {
+            key: kwargs.pop(key) for key in ("ignore_index", "shift_labels", "num_items_in_batch")
+            if key in kwargs
+        }
+
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1204,17 +1352,41 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
+            _apply_final_norm=not fuse_final_norm,
             **kwargs,
         )
 
         hidden_states = outputs[0]
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head_fwd(hidden_states[:, slice_indices, :]).float()
-
-        loss = None
-        if labels is not None:
-            loss = self.loss_function(logits, labels, self.vocab_size, **kwargs)
+        logits = loss = None
+        if not return_logits:
+            ignore_index = loss_kwargs.get("ignore_index", -100)
+            targets = loss_kwargs.get("shift_labels")
+            if targets is None:
+                targets = torch.nn.functional.pad(labels, (0, 1), value=ignore_index)[..., 1:].contiguous()
+            targets = targets.to(hidden_states.device)
+            denominator = loss_kwargs.get("num_items_in_batch")
+            if denominator is not None:
+                denominator = torch.as_tensor(denominator, device=hidden_states.device)
+            if fuse_final_norm:
+                loss = _RMSNormLinearLoss.apply(
+                    hidden_states, self.model.norm_f.weight, self.lm_head.weight,
+                    targets, denominator, self.model.norm_f.variance_epsilon,
+                    ignore_index, self.config.loss_chunk_size,
+                )
+            else:
+                loss = _chunked_linear_loss(
+                    hidden_states, self.lm_head.weight, targets, denominator,
+                    ignore_index, self.config.loss_chunk_size,
+                )
+        else:
+            slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+            selected_states = hidden_states[:, slice_indices, :]
+            logits = (
+                self.model.norm_f.forward_linear(selected_states, self.lm_head)
+                if fuse_final_norm else self.lm_head_fwd(selected_states)
+            ).float()
+            if labels is not None:
+                loss = self.loss_function(logits, labels, self.vocab_size, **loss_kwargs, **kwargs)
 
         return CausalLMOutputWithPast(
             loss=loss,

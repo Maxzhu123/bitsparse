@@ -15,6 +15,39 @@ if TYPE_CHECKING:
 
 
 # ------------------------------------------------------------
+# Fused RMS norm-linear
+# ------------------------------------------------------------
+class FusedRMSNormMLP(Function):
+    """Bias-free BF16 Linear(RMSNorm(x)), saving raw inputs and FP32 RMS statistics."""
+
+    @staticmethod
+    def forward(ctx, x: Tensor, W1: Tensor, norm_weight: Tensor, eps: float = 1e-6):
+        """x[..., in], norm_weight[in], W1[out, in]."""
+        x_fp32 = x.float()
+        rstd = torch.rsqrt(x_fp32.square().mean(-1, keepdim=True) + eps)
+        normalized = (x_fp32 * rstd * norm_weight.float()).to(torch.bfloat16)
+        ctx.save_for_backward(x, W1, norm_weight, rstd)
+        return torch.nn.functional.linear(normalized, W1)
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx, grad_output: Tensor):
+        x, W1, norm_weight, rstd = ctx.saved_tensors
+        grad_output = grad_output.reshape(-1, W1.shape[0])
+        x_hat = (x.float() * rstd).reshape(-1, x.shape[-1])
+        weight_fp32 = norm_weight.float()
+
+        normalized = (x_hat * weight_fp32).to(torch.bfloat16)
+        grad_W1 = grad_output.T @ normalized
+        grad_normalized = (grad_output @ W1).float()
+        grad_norm_weight = (grad_normalized * x_hat).sum(0).to(torch.bfloat16)
+        grad_x_hat = grad_normalized * weight_fp32
+        correction = (grad_x_hat * x_hat).mean(-1, keepdim=True)
+        grad_x = (grad_x_hat - x_hat * correction) * rstd.reshape(-1, 1)
+        return grad_x.reshape(x.shape).to(torch.bfloat16), grad_W1, grad_norm_weight, None
+
+
+# ------------------------------------------------------------
 # ReLU layers
 # ------------------------------------------------------------
 class ReluLinear(Function):
@@ -175,3 +208,18 @@ class FFNRelu2:
         if b2 is not None:
             y = y + b2
         return y
+
+
+class RMSFFNRelu2:
+    """BF16 sparse ReLU² FFN with a fused RMSNorm/up projection."""
+
+    @staticmethod
+    def apply(x: Tensor, W1: Tensor, W2: Tensor, norm_weight: Tensor, *,
+              eps: float = 1e-6, sparse_data: TensorBuffer | None = None,
+              pack_sbit: bool = False):
+        """x[..., in], norm_weight[in], W1[ff, in], W2[out, ff]."""
+        batch_dims = x.shape[:-1]
+        x = x.reshape(-1, x.shape[-1])
+        z = FusedRMSNormMLP.apply(x, W1, norm_weight, eps)
+        y = Relu2Linear.apply(z, W2, sparse_data, pack_sbit, torch.bfloat16)
+        return y.reshape(*batch_dims, y.shape[-1])
