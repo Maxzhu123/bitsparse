@@ -1,9 +1,8 @@
 import torch
-import torch.nn.functional as F
 
 from lib_sparse.layers import RMSFFNRelu, RMSFFNRelu2
 from lib_sparse.bitsparse import TensorBuffer
-from experiments.experiment import FFNReluABC, FFN, FFNRelu2ABC, FFNRelu2_2
+from experiments.experiment import FFNReluABC, RMSFFN, FFNRelu2ABC, RMSFFNRelu2 as DenseRMSFFNRelu2
 
 BASIC_MODE = True
 
@@ -26,8 +25,7 @@ class FFNReluModel(FFNReluABC):
                     sparse_data=buffer, pack_sbit=pack_sbit,
                 )
             else:
-                x_inner = F.rms_norm(x, x.shape[1:])
-                x = x + FFN.apply(x_inner, W1, W2)
+                x = x + RMSFFN.apply(x, W1, W2)
         return x
 
 
@@ -49,8 +47,7 @@ class FFNRelu2Model(FFNRelu2ABC):
                     sparse_data=buffer, pack_sbit=pack_sbit,
                 )
             else:
-                x_inner = F.rms_norm(x, x.shape[1:])
-                x = x + FFNRelu2_2.apply(x_inner, W1, W2)
+                x = x + DenseRMSFFNRelu2.apply(x, W1, W2)
         return x
 
 
@@ -70,8 +67,8 @@ if __name__ == "__main__":
     #
     exp.DATA_SPARSITY = "Sparse"
     c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
-    # for _ in range(5):
-    #     run_batch(FFNReluModel, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[16_000], save_name="./results/relu_sparse.csv")
+    for _ in range(5):
+        run_batch(FFNReluModel, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[16_000], save_name="./results/relu_sparse.csv")
     print(":"*75)
     print("Running with FFNRelu2")
     for _ in range(2):

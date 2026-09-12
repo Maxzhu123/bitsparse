@@ -2,7 +2,6 @@ import math
 import torch
 import torch.nn as nn
 import random
-import torch.nn.functional as F
 import gc
 import time
 
@@ -129,8 +128,13 @@ class GaussianProjector(nn.Module):
 class _CompActLinear(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, x, weight, projector):
+    def forward(ctx, x, weight, projector, rms_norm=False):
         weight.projector = projector
+        raw_x = rstd = None
+        if rms_norm:
+            raw_x = x
+            x, rstd = torch.ops.aten._fused_rms_norm.default(x, x.shape[1:], None, None)
+        # Project normalized activations for the same approximate weight gradient as before.
 
         if USE_FP8:
             x_fp8, x_scale = to_fp8(x)
@@ -147,13 +151,13 @@ class _CompActLinear(torch.autograd.Function):
         else:
             x_small_fp8, x_small_scale = x_small, None
         ctx.x_small_scale = x_small_scale
-        ctx.save_for_backward(x_small_fp8, weight)
+        ctx.save_for_backward(x_small_fp8, weight, raw_x, rstd)
 
         return y
 
     @staticmethod
     def backward(ctx, grad_output):
-        x_small_fp8, weight = ctx.saved_tensors
+        x_small_fp8, weight, raw_x, rstd = ctx.saved_tensors
         x_small_scale = ctx.x_small_scale
 
         # Dequantize the saved projection back to bf16 for the gradient matmul.
@@ -168,7 +172,11 @@ class _CompActLinear(torch.autograd.Function):
         grad_weight_small = matmul(grad_output.T, x_small, USE_FP8)
 
         weight.small_grad = grad_weight_small
-        return grad_x, None, None
+        if raw_x is not None and ctx.needs_input_grad[0]:
+            grad_x = torch.ops.aten._fused_rms_norm_backward.default(
+                grad_x, raw_x, raw_x.shape[1:], rstd, None, [True, False],
+            )[0]
+        return grad_x, None, None, None
 
 
 # ---------------------------------------------------------
@@ -190,8 +198,8 @@ class CompActLinear(nn.Module):
 
         self.projector = GaussianProjector(in_features, out_features // rank_scale)
 
-    def forward(self, x):
-        return _CompActLinear.apply(x, self.weight, self.projector)
+    def forward(self, x, rms_norm=False):
+        return _CompActLinear.apply(x, self.weight, self.projector, rms_norm)
 
 
 class FFN(nn.Module):
@@ -205,14 +213,14 @@ class FFN(nn.Module):
 
     @torch.compile()
     def forward_relu(self, x):
-        x = self.lin1(x)
+        x = self.lin1(x, rms_norm=True)
         x.relu_()
         x = self.lin2(x)
         return x
 
     # @torch.compile()
     def forward_relu2(self, x):
-        x = self.lin1(x)
+        x = self.lin1(x, rms_norm=True)
         x.relu_()
         x = x.square()
         x = self.lin2(x)
@@ -228,11 +236,10 @@ class FFNCompAct(nn.Module):
 
     def forward(self, x, relu2=False):
         for l in self.layers:
-            x_inner = F.rms_norm(x, x.shape[1:])
             if relu2:
-                x = x + l.forward_relu2(x_inner)
+                x = x + l.forward_relu2(x)
             else:
-                x = x + l.forward_relu(x_inner)
+                x = x + l.forward_relu(x)
         return x
 
 

@@ -4,10 +4,10 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 from torch import Tensor
 from torch.autograd import Function
-import torch.nn.functional as F
 import csv
 
-from experiments.experiment import FFNReluABC, FFN, FFNRelu2ABC
+from experiments.experiment import FFNReluABC, FFNRelu2ABC
+from lib_sparse.layers import FusedRMSNormMLP
 
 
 def to_sparse_csr(h):
@@ -16,7 +16,7 @@ def to_sparse_csr(h):
     # Convert to int32 indexing
     crow, col, vals = h_sparse.crow_indices(), h_sparse.col_indices(), h_sparse.values()
     crow, col = crow.to(torch.int32), col.to(torch.int32)
-    h_sparse = torch.sparse_csr_tensor(crow, col, vals)
+    h_sparse = torch.sparse_csr_tensor(crow, col, vals, size=h.shape)
 
     return h_sparse
 
@@ -53,8 +53,8 @@ class ReluLinear(Function):
         return grad_z, grad_W2, None
 
 
-class FFNRelu:
-    """ FFN block with relu activation"""
+class RMSFFNRelu:
+    """RMSNorm and CSR-cached ReLU FFN, accepting raw inputs."""
     @staticmethod
     def apply(x, W1, W2):
         """ FFN block with relu2 activation, 2 linear layers.
@@ -67,7 +67,7 @@ class FFNRelu:
         bs_dims = x.shape[:-1]          # [*bs, d_in]
         x = x.reshape(-1, x.shape[-1])  # [batch, d_in]
 
-        z = x @ W1.T
+        z = FusedRMSNormMLP.apply(x, W1, None, torch.finfo(torch.float32).eps)
         y = ReluLinear.apply(z, W2)
 
         y = y.reshape(*bs_dims,  y.shape[-1])   # [*bs, d_out]
@@ -111,7 +111,9 @@ class Relu2Linear(Function):
         return grad_z, grad_W2, None
 
 
-class FFNRelu2:
+class RMSFFNRelu2:
+    """RMSNorm and CSR-cached ReLU² FFN, accepting raw inputs."""
+
     @staticmethod
     def apply(x, W1, W2):
         """ FFN block with relu2 activation, 2 linear layers.
@@ -126,7 +128,7 @@ class FFNRelu2:
         bs_dims = x.shape[:-1]          # [*bs, d_in]
         x = x.reshape(-1, x.shape[-1])  # [batch, d_in]
 
-        z = x @ W1.T                    # [batch, d_ff]
+        z = FusedRMSNormMLP.apply(x, W1, None, torch.finfo(torch.float32).eps)
         y = Relu2Linear.apply(z, W2) # [batch, d_out]
 
         y = y.reshape(*bs_dims,  y.shape[-1])   # [*bs, d_out]
@@ -143,8 +145,7 @@ class FFNReluCSR(FFNReluABC):
         """Run the residual FFN stack while allocating sparse storage for this pass."""
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
-            x_inner = F.rms_norm(x, x.shape[1:])
-            x = x + FFNRelu.apply(x_inner, W1, W2)
+            x = x + RMSFFNRelu.apply(x, W1, W2)
         return x
 
 
@@ -157,8 +158,7 @@ class FFNRelu2CSR(FFNRelu2ABC):
         """Run the residual FFN stack while allocating sparse storage for this pass."""
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
-            x_inner = F.rms_norm(x, x.shape[1:])
-            x = x + FFNRelu2.apply(x_inner, W1, W2)
+            x = x + RMSFFNRelu2.apply(x, W1, W2)
         return x
 
 

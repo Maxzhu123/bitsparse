@@ -1,4 +1,5 @@
 from torch.autograd import Function
+from torch.utils.checkpoint import checkpoint
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -237,22 +238,18 @@ def gen_params(dim, G, dtype, expansion=5.25, device="cuda"):
     return W1, W2
 
 # ------------------------------------------------------------------------------
-# Baseline FFN layers parameters
+# Baseline RMSNorm FFN layers
 # ------------------------------------------------------------------------------
-class FFN(Function):
-    """Dense baseline autograd FFN for comparison.
-
-    For ``x[B, D]``, ``W1[H, D]``, and ``W2[D, H]`` computes
-    ``z = relu(x @ W1.T)`` and ``output = z @ W2.T``.  The forward matmuls
-    are quantized to FP8 (fp8 + fp8 -> bf16) and the ReLU activation is
-    cached as FP8 + scale, matching the ``lib_sparse.layers`` FFN.
-    """
+class RMSFFN(Function):
+    """Dense RMSNorm/ReLU FFN, saving raw x, RMS statistics and one activation."""
 
     @staticmethod
-    def forward(ctx, x, W1, W2, e1=None):
+    def forward(ctx, x, W1, W2):
         """Run the dense FFN forward pass and save tensors for backward."""
         fp8 = is_fp8(DTYPE)
-        z = matmul(x, W1.T, fp8)
+        normalized, rstd = torch.ops.aten._fused_rms_norm.default(x, x.shape[1:], None, None)
+        z = matmul(normalized, W1.T, fp8)
+        del normalized
         z.relu_()
         # Cache the activation as FP8 + scale (halves the saved memory).
         if fp8:
@@ -260,14 +257,14 @@ class FFN(Function):
         else:
             z, z_scale = z, None
         output = matmul(z, W2.T, fp8, a_scale=z_scale)
-        ctx.save_for_backward(x, W1, W2, z)
+        ctx.save_for_backward(x, W1, W2, z, rstd)
         ctx.z_scale = z_scale
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
         """Compute dense FFN gradients from ``grad_output[B, D]``."""
-        x, W1, W2, z = ctx.saved_tensors
+        x, W1, W2, z, rstd = ctx.saved_tensors
         z_scale = ctx.z_scale
         needs_x = ctx.needs_input_grad[0]
         fp8 = is_fp8(DTYPE)
@@ -299,39 +296,40 @@ class FFN(Function):
             grad_preact, scale = grad_preact, None
 
         if needs_x:
-            grad_x = matmul(grad_preact, W1, fp8, a_scale=scale)
+            grad_normalized = matmul(grad_preact, W1, fp8, a_scale=scale)
+            grad_x = torch.ops.aten._fused_rms_norm_backward.default(
+                grad_normalized, x, x.shape[1:], rstd, None, [True, False],
+            )[0]
+            del grad_normalized
         else:
             grad_x = None
-        grad_W1 = matmul(grad_preact.T, x, fp8, a_scale=scale)
-        return grad_x, grad_W1, grad_W2, None, None
+        normalized = F.rms_norm(x, x.shape[1:])
+        grad_W1 = matmul(grad_preact.T, normalized, fp8, a_scale=scale)
+        return grad_x, grad_W1, grad_W2
 
     @staticmethod
     def apply_ckpt(x, W1, W2):
-        return torch.utils.checkpoint.checkpoint(FFN.forward_ckpt, x, W1, W2, use_reentrant=False)
+        return checkpoint(RMSFFN.forward_ckpt, x, W1, W2, use_reentrant=False)
 
     @staticmethod
     def forward_ckpt(x, W1, W2):
-        """Run the dense FFN forward pass and save tensors for backward."""
+        """Checkpoint the full RMSNorm and FFN from raw inputs."""
         fp8 = is_fp8(DTYPE)
-        z = matmul(x, W1.T, fp8)
+        normalized = F.rms_norm(x, x.shape[1:])
+        z = matmul(normalized, W1.T, fp8)
         z.relu_()
         output = matmul(z, W2.T, fp8)
         return output
 
 
-class FFNRelu2_2(Function):
-    """Dense baseline autograd FFN with ReLU² activation for comparison.
-
-    For ``x[B, D]``, ``W1[H, D]``, and ``W2[D, H]`` computes
-    ``z = RELU2_SCALE * relu(x @ W1.T)²`` and ``output = z @ W2.T``.  The
-    forward matmuls are quantized to FP8 (fp8 + fp8 -> bf16) while the ReLU
-    activation is cached as FP8 + scale, matching the ``lib_sparse.layers``
-    FFN.
-    """
+class RMSFFNRelu2(Function):
+    """Dense RMSNorm/ReLU² FFN, saving raw x, RMS statistics and unsquared ReLU."""
     @staticmethod
     def forward(ctx, x, W1, W2):
         fp8 = is_fp8(DTYPE)
-        z = matmul(x, W1.T, fp8)
+        normalized, rstd = torch.ops.aten._fused_rms_norm.default(x, x.shape[1:], None, None)
+        z = matmul(normalized, W1.T, fp8)
+        del normalized
         r = z.relu_()
         # Cache r = relu(preact) as FP8 + scale (halves the saved memory).
         if fp8:
@@ -340,13 +338,13 @@ class FFNRelu2_2(Function):
             r_fp8, r_scale = r, None
         z = r.square()
         z.mul_(RELU2_SCALE)
-        ctx.save_for_backward(x, W1, W2, r_fp8)
+        ctx.save_for_backward(x, W1, W2, r_fp8, rstd)
         ctx.r_scale = r_scale
         return matmul(z, W2.T, fp8)
 
     @staticmethod
     def backward(ctx, grad_output):
-        x, W1, W2, r = ctx.saved_tensors
+        x, W1, W2, r, rstd = ctx.saved_tensors
         r_scale = ctx.r_scale
         needs_x = ctx.needs_input_grad[0]
         fp8 = is_fp8(DTYPE)
@@ -379,19 +377,25 @@ class FFNRelu2_2(Function):
 
         grad_x = None
         if needs_x:
-            grad_x = matmul(grad_preact, W1, fp8, a_scale=scale)
-        grad_W1 = matmul(grad_preact.T, x, fp8, a_scale=scale)
+            grad_normalized = matmul(grad_preact, W1, fp8, a_scale=scale)
+            grad_x = torch.ops.aten._fused_rms_norm_backward.default(
+                grad_normalized, x, x.shape[1:], rstd, None, [True, False],
+            )[0]
+            del grad_normalized
+        normalized = F.rms_norm(x, x.shape[1:])
+        grad_W1 = matmul(grad_preact.T, normalized, fp8, a_scale=scale)
         return grad_x, grad_W1, grad_W2
 
     @staticmethod
     def apply_ckpt(x, W1, W2):
-        return torch.utils.checkpoint.checkpoint(FFNRelu2_2.forward_ckpt, x, W1, W2, use_reentrant=False)
+        return checkpoint(RMSFFNRelu2.forward_ckpt, x, W1, W2, use_reentrant=False)
 
     @staticmethod
     def forward_ckpt(x, W1, W2):
-        """Run the dense FFN forward pass and save tensors for backward."""
+        """Checkpoint the full RMSNorm and FFN from raw inputs."""
         fp8 = is_fp8(DTYPE)
-        z = matmul(x, W1.T, fp8)
+        normalized = F.rms_norm(x, x.shape[1:])
+        z = matmul(normalized, W1.T, fp8)
         r = z.relu_()
         z = r.square()
         z.mul_(RELU2_SCALE)
@@ -420,11 +424,10 @@ class FFNReluABC(nn.Module):
     def forward_base(self, x):
         """Run the dense baseline on ``x[B, D]`` through all residual layers."""
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
-            x_inner = F.rms_norm(x, x.shape[1:])
             if i < self.sp_blocks:
-                x = x + FFN.apply_ckpt(x_inner, W1, W2)
+                x = x + RMSFFN.apply_ckpt(x, W1, W2)
             else:
-                x = x + FFN.apply(x_inner, W1, W2)
+                x = x + RMSFFN.apply(x, W1, W2)
         return x
 
 
@@ -441,9 +444,8 @@ class FFNRelu2ABC(nn.Module):
 
     def forward_base(self, x):
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
-            x_inner = F.rms_norm(x, x.shape[1:])
             if i < self.sp_blocks:
-                x = x + FFNRelu2_2.apply_ckpt(x_inner, W1, W2)
+                x = x + RMSFFNRelu2.apply_ckpt(x, W1, W2)
             else:
-                x = x + FFNRelu2_2.apply(x_inner, W1, W2)
+                x = x + RMSFFNRelu2.apply(x, W1, W2)
         return x

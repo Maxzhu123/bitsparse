@@ -8,11 +8,40 @@ import csv
 from experiments.experiment import FFNReluABC, FFNRelu2ABC
 from lib_sparse.fp8 import matmul, to_fp8
 from lib_sparse.config import RELU2_SCALE
+from lib_sparse.layers import FusedRMSNormMLP
 
 algos = ["LZ4", "Zstd", "Cascaded", "Bitcomp"]
 ALGO = None
 
 USE_FP8 = False
+
+
+class _RMSNormFp8Linear(Function):
+    """Recompute the existing FP8 projection graph without retaining normalized inputs."""
+
+    @staticmethod
+    def forward(ctx, x, weight):
+        ctx.save_for_backward(x, weight)
+        return matmul(F.rms_norm(x, x.shape[1:]), weight.T, True)
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx, grad_output):
+        x, weight = ctx.saved_tensors
+        # Reuse MatmulFp8's gradient/quantization semantics, including its dtype casts.
+        with torch.enable_grad():
+            x = x.detach().requires_grad_()
+            weight = weight.detach().requires_grad_()
+            output = matmul(F.rms_norm(x, x.shape[1:]), weight.T, True)
+            grad_x, grad_weight = torch.autograd.grad(output, (x, weight), grad_output)
+        return grad_x, grad_weight
+
+
+def rms_linear(x, weight):
+    if USE_FP8:
+        return _RMSNormFp8Linear.apply(x, weight)
+    return FusedRMSNormMLP.apply(x, weight, None, torch.finfo(torch.float32).eps)
+
 
 class Compressor:
     def __init__(self, algorithm):
@@ -143,8 +172,8 @@ class ReluLinear(Function):
         return grad_z, grad_W2, None
 
 
-class FFNRelu:
-    """ FFN block with relu activation"""
+class RMSFFNRelu:
+    """RMSNorm and nvCOMP-cached ReLU FFN, accepting raw inputs."""
     @staticmethod
     def apply(x, W1, W2, compressor: Compressor):
         """ FFN block with relu2 activation, 2 linear layers.
@@ -157,7 +186,7 @@ class FFNRelu:
         bs_dims = x.shape[:-1]          # [*bs, d_in]
         x = x.reshape(-1, x.shape[-1])  # [batch, d_in]
 
-        z = matmul(x, W1.T, USE_FP8)
+        z = rms_linear(x, W1)
         y = ReluLinear.apply(z, W2, compressor)
 
         y = y.reshape(*bs_dims,  y.shape[-1])   # [*bs, d_out]
@@ -222,7 +251,9 @@ class Relu2Linear(Function):
         return grad_z, grad_W2, None
 
 
-class FFNRelu2:
+class RMSFFNRelu2:
+    """RMSNorm and nvCOMP-cached ReLU² FFN, accepting raw inputs."""
+
     @staticmethod
     def apply(x, W1, W2, compressor: Compressor  ):
         """ FFN block with relu2 activation, 2 linear layers.
@@ -237,7 +268,7 @@ class FFNRelu2:
         bs_dims = x.shape[:-1]          # [*bs, d_in]
         x = x.reshape(-1, x.shape[-1])  # [batch, d_in]
 
-        z = matmul(x, W1.T, USE_FP8)    # [batch, d_ff]
+        z = rms_linear(x, W1)
         y = Relu2Linear.apply(z, W2, compressor) # [batch, d_out]
 
         y = y.reshape(*bs_dims,  y.shape[-1])   # [*bs, d_out]
@@ -254,8 +285,7 @@ class FFNReluNVCOMP(FFNReluABC):
         """Run the residual FFN stack while allocating sparse storage for this pass."""
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
-            x_inner = F.rms_norm(x, x.shape[1:])
-            x = x + FFNRelu.apply(x_inner, W1, W2, self.compressor)
+            x = x + RMSFFNRelu.apply(x, W1, W2, self.compressor)
         return x
 
 
@@ -269,8 +299,7 @@ class FFNRelu2NVCOMP(FFNRelu2ABC):
         """Run the residual FFN stack while allocating sparse storage for this pass."""
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
-            x_inner = F.rms_norm(x, x.shape[1:])
-            x = x + FFNRelu2.apply(x_inner, W1, W2, self.compressor)
+            x = x + RMSFFNRelu2.apply(x, W1, W2, self.compressor)
         return x
 
 
