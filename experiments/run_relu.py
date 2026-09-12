@@ -22,7 +22,7 @@ class FFNReluModel(FFNReluABC):
             if i < self.sp_blocks:
                 x = x + RMSFFNRelu.apply(
                     x, W1, W2, eps=torch.finfo(torch.float32).eps,
-                    sparse_data=buffer, pack_sbit=pack_sbit,
+                    sparse_data=buffer, pack_sbit=pack_sbit, storage_dtype=storage_dtype,
                 )
             else:
                 x = x + RMSFFN.apply(x, W1, W2)
@@ -44,7 +44,7 @@ class FFNRelu2Model(FFNRelu2ABC):
                 # Normalize raw x once, using F.rms_norm's default BF16 accumulator epsilon.
                 x = x + RMSFFNRelu2.apply(
                     x, W1, W2, eps=torch.finfo(torch.float32).eps,
-                    sparse_data=buffer, pack_sbit=pack_sbit,
+                    sparse_data=buffer, pack_sbit=pack_sbit, storage_dtype=storage_dtype,
                 )
             else:
                 x = x + DenseRMSFFNRelu2.apply(x, W1, W2)

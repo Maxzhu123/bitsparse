@@ -18,24 +18,33 @@ if TYPE_CHECKING:
 # Fused RMS norm-linear
 # ------------------------------------------------------------
 class FusedRMSNormMLP(Function):
-    """Bias-free BF16 Linear(RMSNorm(x)), saving raw inputs and FP32 RMS statistics."""
+    """Bias-free RMSNorm/linear with BF16 inputs/weights and optional FP8 GEMMs."""
 
     @staticmethod
-    def forward(ctx, x: Tensor, W1: Tensor, norm_weight: Tensor | None = None, eps: float = 1e-6):
-        """x[..., in], optional norm_weight[in], W1[out, in]."""
+    def forward(ctx, x: Tensor, W1: Tensor, norm_weight: Tensor | None = None,
+                eps: float = 1e-6, fp8: bool = False):
+        """BF16 x[..., in] and W1[out, in]; fp8 enables scaled E4M3 GEMMs."""
+        if fp8 and (x.dtype != torch.bfloat16 or W1.dtype != torch.bfloat16):
+            raise ValueError("FP8 compute requires BF16 inputs/master weights; quantization is internal.")
         normalized, rstd = torch.ops.aten._fused_rms_norm.default(
             x, [x.shape[-1]], norm_weight, eps,
         )
         ctx.save_for_backward(x, W1, norm_weight, rstd)
         ctx.eps = eps
-        return torch.nn.functional.linear(normalized, W1)
+        ctx.fp8 = fp8
+        output = matmul(normalized.reshape(-1, x.shape[-1]), W1.T, fp8)
+        return output.reshape(*x.shape[:-1], W1.shape[0])
 
     @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(ctx, grad_output: Tensor):
         x, W1, norm_weight, rstd = ctx.saved_tensors
         grad_output = grad_output.reshape(-1, W1.shape[0])
-        grad_normalized = (grad_output @ W1).reshape(x.shape)
+        if ctx.fp8:
+            grad_output, grad_scale = to_fp8(grad_output)
+        else:
+            grad_scale = None
+        grad_normalized = matmul(grad_output, W1, ctx.fp8, a_scale=grad_scale).reshape(x.shape)
         grad_x, grad_norm_weight = torch.ops.aten._fused_rms_norm_backward.default(
             grad_normalized, x, [x.shape[-1]], rstd, norm_weight,
             [True, norm_weight is not None],
@@ -44,8 +53,8 @@ class FusedRMSNormMLP(Function):
 
         # Recompute the BF16 projection input and allocate the large weight gradient last.
         normalized = torch.nn.functional.rms_norm(x, [x.shape[-1]], norm_weight, ctx.eps)
-        grad_W1 = grad_output.T @ normalized.reshape(-1, x.shape[-1])
-        return grad_x, grad_W1, grad_norm_weight, None
+        grad_W1 = matmul(grad_output.T, normalized.reshape(-1, x.shape[-1]), ctx.fp8, a_scale=grad_scale)
+        return grad_x, grad_W1, grad_norm_weight, None, None
 
 
 # ------------------------------------------------------------
@@ -64,7 +73,7 @@ class ReluLinear(Function):
 
         # Quantize input if needed
         if is_fp8(dtype):
-            h, scale = to_fp8(h)
+            h, scale = to_fp8(h, dtype)
         else:
             scale = None
 
@@ -129,17 +138,19 @@ class FFNRelu:
 
 
 class RMSFFNRelu:
-    """BF16 sparse ReLU FFN with a fused RMSNorm/up projection."""
+    """Sparse ReLU FFN: BF16 inputs/weights, BF16 or FP8 compute/storage."""
 
     @staticmethod
     def apply(x: Tensor, W1: Tensor, W2: Tensor, norm_weight: Tensor | None = None, *,
               eps: float = 1e-6, sparse_data: TensorBuffer | None = None,
-              pack_sbit: bool = False):
+              pack_sbit: bool = False, storage_dtype: torch.dtype = torch.bfloat16):
         """x[..., in], optional norm_weight[in], W1[ff, in], W2[out, ff]."""
+        if storage_dtype != torch.bfloat16 and not is_fp8(storage_dtype):
+            raise ValueError("storage_dtype must be bfloat16, float8_e4m3fn or float8_e5m2.")
         batch_dims = x.shape[:-1]
         x = x.reshape(-1, x.shape[-1])
-        z = FusedRMSNormMLP.apply(x, W1, norm_weight, eps)
-        y = ReluLinear.apply(z, W2, sparse_data, pack_sbit, torch.bfloat16)
+        z = FusedRMSNormMLP.apply(x, W1, norm_weight, eps, is_fp8(storage_dtype))
+        y = ReluLinear.apply(z, W2, sparse_data, pack_sbit, storage_dtype)
         return y.reshape(*batch_dims, y.shape[-1])
 
 
@@ -159,7 +170,7 @@ class Relu2Linear(Function):
 
         # Quantize input if needed
         if is_fp8(storage_dtype):
-            h_stored, scale = to_fp8(h)
+            h_stored, scale = to_fp8(h, storage_dtype)
         else:
             h_stored, scale = h, None
 
@@ -227,15 +238,17 @@ class FFNRelu2:
 
 
 class RMSFFNRelu2:
-    """BF16 sparse ReLU² FFN with a fused RMSNorm/up projection."""
+    """Sparse ReLU² FFN: BF16 inputs/weights, BF16 or FP8 compute/storage."""
 
     @staticmethod
     def apply(x: Tensor, W1: Tensor, W2: Tensor, norm_weight: Tensor=None, *,
               eps: float = 1e-6, sparse_data: TensorBuffer | None = None,
-              pack_sbit: bool = False):
+              pack_sbit: bool = False, storage_dtype: torch.dtype = torch.bfloat16):
         """x[..., in], norm_weight[in], W1[ff, in], W2[out, ff]."""
+        if storage_dtype != torch.bfloat16 and not is_fp8(storage_dtype):
+            raise ValueError("storage_dtype must be bfloat16, float8_e4m3fn or float8_e5m2.")
         batch_dims = x.shape[:-1]
         x = x.reshape(-1, x.shape[-1])
-        z = FusedRMSNormMLP.apply(x, W1, norm_weight, eps)
-        y = Relu2Linear.apply(z, W2, sparse_data, pack_sbit, torch.bfloat16)
+        z = FusedRMSNormMLP.apply(x, W1, norm_weight, eps, is_fp8(storage_dtype))
+        y = Relu2Linear.apply(z, W2, sparse_data, pack_sbit, storage_dtype)
         return y.reshape(*batch_dims, y.shape[-1])

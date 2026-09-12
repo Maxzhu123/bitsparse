@@ -59,11 +59,12 @@ def dense_to_tilesparse(
 ) -> BitsparseTensor:
     """Convert dense tensor into a BitsparseTensor.
 
-    FP8 values are compacted as-is; BF16 values are quantized to FP8 storage
-    with a per-tensor scale that becomes part of the sparse metadata.  Only the
-    bf16-to-fp8 path needs a scale, so fp8 inputs skip it entirely.
-    Reconstructed tensors stay in the input's dtype.
+    Values are already in their storage dtype. FP8 callers supply the
+    quantization scale; BF16 values are stored without conversion.
     """
+    if sparse_data is not None:
+        if sparse_data.dtype != dense.dtype or sparse_data.pack_sbit != pack_sbit:
+            raise ValueError("Sparse buffer dtype and packing must match the stored activations.")
     prepared = _prepare_tiles(dense)
     M, N = prepared.M, prepared.N
     grid_m, grid_n = prepared.grid_m, prepared.grid_n
@@ -97,5 +98,4 @@ def dense_to_tilesparse(
         scale=scale,
         vals_offset=vals_offset, pack_sbit=pack_sbit,
     )
-
 

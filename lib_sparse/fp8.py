@@ -7,7 +7,6 @@ from .config import CACHE_FP8_MATMUl
 
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
 _FP8_DTYPE = torch.float8_e4m3fn
-_FP8_MAX = torch.finfo(_FP8_DTYPE).max
 
 # Blackwell (cc >= 12) accepts row-major ``mat_b`` directly.  Ada (cc < 12)
 # requires the cuBLASLt layout (A row-major, B column-major) or scaled_mm
@@ -31,6 +30,15 @@ def _scaled_mm(a: Tensor, b: Tensor, a_scale: Tensor, b_scale: Tensor, output_dt
     accepts the row-major B directly, so the reformat is skipped there to
     avoid the extra copies.
     """
+    # FP8 GEMMs require aligned dimensions, including token counts used as K in backward.
+    m, k = a.shape
+    n = b.shape[1]
+    pad_m, pad_k, pad_n = (-m) % 16, (-k) % 16, (-n) % 16
+    if pad_m or pad_k:
+        a = F.pad(a, (0, pad_k, 0, pad_m))
+    if pad_k or pad_n:
+        b = F.pad(b, (0, pad_n, 0, pad_k))
+
     # cuBLASLt FP8 wants A row-major contiguous (all architectures).
     # No allocation if already row-major contiguous.
     if a.stride(1) != 1:
@@ -42,16 +50,18 @@ def _scaled_mm(a: Tensor, b: Tensor, a_scale: Tensor, b_scale: Tensor, output_dt
         if b.stride(0) != 1:
             b = b.T.contiguous().T
 
-    return F.scaled_mm(
+    out = F.scaled_mm(
         mat_a=a, mat_b=b,
         scale_a=a_scale, scale_b=b_scale, output_dtype=output_dtype,
         scale_recipe_a=F.ScalingType.TensorWise, scale_recipe_b=F.ScalingType.TensorWise,
     )
+    return out[:m, :n].contiguous()
 
 
 class MatmulFp8(Function):
     @staticmethod
     def forward(ctx, a: Tensor, b: Tensor, a_scale: Tensor|None=None, b_scale: Tensor|None=None) -> Tensor:
+        ctx.a_dtype, ctx.b_dtype = a.dtype, b.dtype
         if not CACHE_FP8_MATMUl:
             ctx.save_for_backward(a, b)
             ctx.a_scale, ctx.b_scale = a_scale, b_scale
@@ -104,13 +114,13 @@ class MatmulFp8(Function):
         if ctx.needs_input_grad[0]:
             grad_a = _scaled_mm(
                 grad_out_fp8, b_fp8.T,
-                grad_out_scale, b_scale, output_dtype=a_fp8.dtype,
-            )
+                grad_out_scale, b_scale, output_dtype=torch.bfloat16,
+            ).to(ctx.a_dtype)
         if ctx.needs_input_grad[1]:
             grad_b = _scaled_mm(
                 a_fp8.T.contiguous(), grad_out_fp8,
-                a_scale, grad_out_scale, output_dtype=b_fp8.dtype,
-            )
+                a_scale, grad_out_scale, output_dtype=torch.bfloat16,
+            ).to(ctx.b_dtype)
 
         return grad_a, grad_b, None, None
 
@@ -122,8 +132,9 @@ def matmul(a: Tensor, b: Tensor, fp8: bool, a_scale:Tensor|None=None, b_scale:Te
 
 @torch.no_grad()
 @torch.compile()
-def to_fp8(x: Tensor) -> tuple[Tensor, Tensor]:
-    scale = (x.detach().abs().max() / _FP8_MAX).to(torch.float32)
+def to_fp8(x: Tensor, dtype: torch.dtype = _FP8_DTYPE) -> tuple[Tensor, Tensor]:
+    """Quantize with a per-tensor scale; GEMMs default to E4M3, storage may use E5M2."""
+    scale = x.detach().abs().max().float() / torch.finfo(dtype).max
     scale = scale.clamp(min=1e-9)
-    x_fp8 = (x / scale).to(_FP8_DTYPE)
+    x_fp8 = (x / scale).to(dtype)
     return x_fp8, scale
