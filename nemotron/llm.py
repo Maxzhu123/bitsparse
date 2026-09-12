@@ -875,7 +875,7 @@ class NemotronHMLP(nn.Module):
                 pack_sbit=self.config.pack_sbit,
             )
         if self.config.use_ckpt:
-            return torch.utils.checkpoint.checkpoint(self._forward_ffn, x, input_norm)
+            return torch.utils.checkpoint.checkpoint(self._forward_ffn, x, input_norm, use_reentrant=True)
         return self._forward_ffn(x, input_norm)
 
 

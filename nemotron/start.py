@@ -114,15 +114,15 @@ def main():
     ).to(device)
     setup_hooks(model)
 
-    model.config.sparse_ffn = True
-    model.config.use_ckpt = False
+    model.config.sparse_ffn = False
+    model.config.use_ckpt = True
     # sparse_data = TensorBuffer(60_000_000)
     sparse_data = None
     model.config.pack_sbit = False
     model.config.sparse_data = sparse_data
 
 
-    with open(f"./results/sparse_{model.config.sparse_ffn}_sbit_{model.config.pack_sbit}.csv",
+    with open(f"./results/ckpt2_sparse_{model.config.sparse_ffn}_sbit_{model.config.pack_sbit}.csv",
               "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["num_tokens", "vram", "time"])
