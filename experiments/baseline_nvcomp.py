@@ -305,33 +305,37 @@ class FFNRelu2NVCOMP(FFNRelu2ABC):
 
 if __name__ == "__main__":
     from experiments.experiment import evaluate_nobase
+    import experiments.experiment as exp
+    from cprint import c_print
 
-    print(f'running with relu')
-    with open("./results/relu_nvcomp.csv", "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "method", "vram", "avg_time",
-        ])
+    for sparsity in ["Sparse", "Normal"]:
+        exp.DATA_SPARSITY =  sparsity
+        c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
 
-        for algo in algos:
-            ALGO = algo
-            print(f"Running with {ALGO}")
-            vram, time = evaluate_nobase(FFNReluNVCOMP, warmup_steps=1, eval_steps=2, bs=16000, sp_blocks=0)
-            writer.writerow([algo, vram, time])
-            f.flush()
+        print(f'running with relu')
+        with open(f"./results/relu_nvcomp_{sparsity}.csv", "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "method", "vram", "avg_time",
+            ])
 
-    print(f'Running with relu2')
-    with open("./results/relu2_nvcomp.csv", "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "method", "vram", "avg_time",
-        ])
+            for algo in algos:
+                ALGO = algo
+                print(f"Running with {ALGO}")
+                vram, time = evaluate_nobase(FFNReluNVCOMP, warmup_steps=1, eval_steps=2, bs=16000, sp_blocks=0)
+                writer.writerow([algo, vram, time])
+                f.flush()
 
-        for algo in algos:
-            ALGO = algo
-            print(f"Running with {ALGO}")
-            vram, time = evaluate_nobase(FFNRelu2NVCOMP, warmup_steps=1, eval_steps=2, bs=16000, sp_blocks=0)
-            writer.writerow([algo, vram, time])
-            f.flush()
+        print(f'Running with relu2')
+        with open(f"./results/relu2_nvcomp_{sparsity}.csv", "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "method", "vram", "avg_time",
+            ])
 
-            # exit(7)
+            for algo in algos:
+                ALGO = algo
+                print(f"Running with {ALGO}")
+                vram, time = evaluate_nobase(FFNRelu2NVCOMP, warmup_steps=1, eval_steps=2, bs=16000, sp_blocks=0)
+                writer.writerow([algo, vram, time])
+                f.flush()
