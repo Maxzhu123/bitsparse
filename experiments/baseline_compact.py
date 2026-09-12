@@ -221,7 +221,7 @@ class FFN(nn.Module):
     # @torch.compile()
     def forward_relu2(self, x):
         x = self.lin1(x, rms_norm=True)
-        x.relu_()
+        x.relu()
         x = x.square()
         x = self.lin2(x)
         return x
