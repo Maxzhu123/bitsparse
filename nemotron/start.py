@@ -127,7 +127,7 @@ def main():
         writer = csv.writer(f)
         writer.writerow(["num_tokens", "vram", "time"])
         # token_sizes = [1100]
-        token_sizes = [50, 100, 200, 300, 400, 500, 700, 900, 1100, 1300, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000, 6500, 7000]
+        token_sizes = [50, 100, 200, 300, 400, 500, 700, 900, 1100, 1300, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000, 6500, 7000, 8000]
         for train_tokens in token_sizes:
             c_print(f'{train_tokens=}, sparse={model.config.sparse_ffn}', color="bright_yellow")
 
