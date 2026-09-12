@@ -45,7 +45,6 @@ class NemotronHConfig(PreTrainedConfig):
     attention_dropout: float | int = 0.0
     sliding_window: int | None = None
     intermediate_size: int = 21504
-    mlp_hidden_act: str = "relu2"
     mlp_bias: bool = False
     use_mamba_kernels: bool = True
     ssm_state_size: int = 128
@@ -335,11 +334,30 @@ class NemotronHMamba2Mixer(nn.Module):
         global is_fast_path_available
 
         if config.use_mamba_kernels:
+            # These kernel packages are distributed separately and may be missing from
+            # the environment. `lazy_load_kernel` returns None (rather than raising)
+            # when the package cannot be imported, so report each one explicitly.
             causal_conv1d = lazy_load_kernel("causal-conv1d")
+            if causal_conv1d is None:
+                print(
+                    "[NemotronHMamba2Mixer] Required kernel package 'causal-conv1d' is NOT installed. "
+                    "Install it with `pip install causal-conv1d` "
+                    "(https://github.com/Dao-AILab/causal-conv1d).",
+                    flush=True,
+                )
+
+            mamba_ssm = lazy_load_kernel("mamba-ssm")
+            if mamba_ssm is None:
+                print(
+                    "[NemotronHMamba2Mixer] Required kernel package 'mamba-ssm' is NOT installed. "
+                    "Install it with `pip install mamba-ssm` "
+                    "(https://github.com/state-spaces/mamba/#installation).",
+                    flush=True,
+                )
+
             causal_conv1d_update = getattr(causal_conv1d, "causal_conv1d_update", None)
             causal_conv1d_fn = getattr(causal_conv1d, "causal_conv1d_fn", None)
 
-            mamba_ssm = lazy_load_kernel("mamba-ssm")
             selective_state_update = resolve_internal_import(
                 mamba_ssm, chained_path="ops.triton.selective_state_update.selective_state_update"
             )
@@ -350,16 +368,39 @@ class NemotronHMamba2Mixer(nn.Module):
                 mamba_ssm, chained_path="ops.triton.ssd_combined.mamba_split_conv1d_scan_combined"
             )
 
-            is_fast_path_available = all(
-                (
-                    selective_state_update,
-                    mamba_chunk_scan_combined,
-                    mamba_split_conv1d_scan_combined,
-                    causal_conv1d_fn,
-                    causal_conv1d_update,
+            # Report the exact package:symbol pairs that could not be resolved so the
+            # environment can be debugged without guessing.
+            missing_kernels = [
+                name
+                for name, value in (
+                    ("causal-conv1d:causal_conv1d_update", causal_conv1d_update),
+                    ("causal-conv1d:causal_conv1d_fn", causal_conv1d_fn),
+                    ("mamba-ssm:ops.triton.selective_state_update.selective_state_update", selective_state_update),
+                    (
+                        "mamba-ssm:ops.triton.ssd_combined.mamba_chunk_scan_combined",
+                        mamba_chunk_scan_combined,
+                    ),
+                    (
+                        "mamba-ssm:ops.triton.ssd_combined.mamba_split_conv1d_scan_combined",
+                        mamba_split_conv1d_scan_combined,
+                    ),
                 )
+                if value is None
+            ]
+
+            is_fast_path_available = not missing_kernels
+            if not is_fast_path_available:
+                print(
+                    "[NemotronHMamba2Mixer] Missing required Mamba/SSM kernel(s): "
+                    + ", ".join(missing_kernels),
+                    flush=True,
+                )
+
+            assert is_fast_path_available, (
+                "One of the required kernels is not available. Missing: "
+                + ", ".join(missing_kernels)
+                + ". Please check your installation."
             )
-            assert is_fast_path_available, "One of the required kernels is not available. Please check your installation."
         else:
             assert False, "Cannot find efficient implementations"
             causal_conv1d_update = None

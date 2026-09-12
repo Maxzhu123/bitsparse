@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from lib_sparse.layers import FFNRelu, FFNRelu2
+from lib_sparse.layers import RMSFFNRelu, RMSFFNRelu2
 from lib_sparse.bitsparse import TensorBuffer
 from experiments.experiment import FFNReluABC, FFN, FFNRelu2ABC, FFNRelu2_2
 
@@ -20,11 +20,13 @@ class FFNReluModel(FFNReluABC):
             buffer.reset_buffer()
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
-            x_inner = F.rms_norm(x, x.shape[1:])
             if i < self.sp_blocks:
-                x = x + FFNRelu.apply(x_inner, W1, W2, sparse_data=buffer, pack_sbit=pack_sbit,
-                                      dtype=storage_dtype)
+                x = x + RMSFFNRelu.apply(
+                    x, W1, W2, eps=torch.finfo(torch.float32).eps,
+                    sparse_data=buffer, pack_sbit=pack_sbit,
+                )
             else:
+                x_inner = F.rms_norm(x, x.shape[1:])
                 x = x + FFN.apply(x_inner, W1, W2)
         return x
 
@@ -40,11 +42,14 @@ class FFNRelu2Model(FFNRelu2ABC):
             buffer.reset_buffer()
 
         for i, (W1, W2) in enumerate(zip(self.W1s, self.W2s)):
-            x_inner = F.rms_norm(x, x.shape[1:])
             if i < self.sp_blocks:
-                x = x + FFNRelu2.apply(x_inner, W1, W2, sparse_data=buffer, pack_sbit=pack_sbit,
-                                       storage_dtype=storage_dtype)
+                # Normalize raw x once, using F.rms_norm's default BF16 accumulator epsilon.
+                x = x + RMSFFNRelu2.apply(
+                    x, W1, W2, eps=torch.finfo(torch.float32).eps,
+                    sparse_data=buffer, pack_sbit=pack_sbit,
+                )
             else:
+                x_inner = F.rms_norm(x, x.shape[1:])
                 x = x + FFNRelu2_2.apply(x_inner, W1, W2)
         return x
 
@@ -70,7 +75,7 @@ if __name__ == "__main__":
     print(":"*75)
     print("Running with FFNRelu2")
     for _ in range(2):
-        run_batch(FFNRelu2Model, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[32, 128, 512, 2000, 4000, 8000, 16000, 32000], save_name="./results/relu2_sparse.csv")
+        run_batch(FFNRelu2Model, sp_blocks=10, warmup_steps=1, eval_steps=3, batch_sizes=[4000], save_name="./results/relu2_sparse.csv")
 
     # run_layers(FFNReluModel, bs=16_000, save_name="relu2_sparser_layers.csv")
     # evaluate(FFMReluModel, bs=16_000, sp_blocks=0)
