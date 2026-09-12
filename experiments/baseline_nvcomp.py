@@ -40,7 +40,7 @@ class _RMSNormFp8Linear(Function):
 def rms_linear(x, weight):
     if USE_FP8:
         return _RMSNormFp8Linear.apply(x, weight)
-    return FusedRMSNormMLP.apply(x, weight, None, torch.finfo(torch.float32).eps)
+    return FusedRMSNormMLP.apply(x, weight, None, torch.finfo(torch.float32).eps).clone()
 
 
 class Compressor:
@@ -316,10 +316,9 @@ if __name__ == "__main__":
         for algo in algos:
             ALGO = algo
             print(f"Running with {ALGO}")
-            for _ in range(5):
-                vram, time = evaluate_nobase(FFNReluNVCOMP, warmup_steps=1, eval_steps=2, bs=16000, sp_blocks=0)
-                writer.writerow([algo, vram, time])
-                f.flush()
+            vram, time = evaluate_nobase(FFNReluNVCOMP, warmup_steps=1, eval_steps=2, bs=16000, sp_blocks=0)
+            writer.writerow([algo, vram, time])
+            f.flush()
 
     print(f'Running with relu2')
     with open("./results/relu2_nvcomp.csv", "a", newline="") as f:
@@ -331,9 +330,8 @@ if __name__ == "__main__":
         for algo in algos:
             ALGO = algo
             print(f"Running with {ALGO}")
-            for _ in range(5):
-                vram, time = evaluate_nobase(FFNRelu2NVCOMP, warmup_steps=1, eval_steps=2, bs=16000, sp_blocks=0)
-                writer.writerow([algo, vram, time])
-                f.flush()
+            vram, time = evaluate_nobase(FFNRelu2NVCOMP, warmup_steps=1, eval_steps=2, bs=16000, sp_blocks=0)
+            writer.writerow([algo, vram, time])
+            f.flush()
 
             # exit(7)

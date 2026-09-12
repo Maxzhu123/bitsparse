@@ -290,12 +290,11 @@ def main():
                 "method", "vram", "avg_time",
             ])
 
-            for _ in range(5):
-                run_test(x, model, 1, relu2=False)
-                time, vram = run_test(x, model, 2, relu2=False)
-                print(f'{time=}, {vram=}')
-                writer.writerow([f"compact_{r}", vram, time])
-                f.flush()
+            run_test(x, model, 1, relu2=False)
+            time, vram = run_test(x, model, 2, relu2=False)
+            print(f'{time=}, {vram=}')
+            writer.writerow([f"compact_{r}", vram, time])
+            f.flush()
 
     print("Running Relu2")
     for r in ratios:
@@ -310,12 +309,11 @@ def main():
                 "method", "vram", "avg_time",
             ])
 
-            for _ in range(5):
-                run_test(x, model, 1, relu2=True)
-                time, vram = run_test(x, model, 2, relu2=True)
-                print(f'{time=}, {vram=}')
-                writer.writerow([f"compact_{r}", vram, time])
-                f.flush()
+            run_test(x, model, 1, relu2=True)
+            time, vram = run_test(x, model, 2, relu2=True)
+            print(f'{time=}, {vram=}')
+            writer.writerow([f"compact_{r}", vram, time])
+            f.flush()
 
 
 if __name__ == '__main__':
