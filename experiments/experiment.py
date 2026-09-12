@@ -14,7 +14,7 @@ from lib_sparse.bitsparse import TensorBuffer, bits_per_value
 from lib_sparse.config import RELU2_SCALE
 from lib_sparse.fp8 import is_fp8, matmul, to_fp8
 
-LAYERS = 8
+LAYERS = 12
 BATCH_SIZE = 10000
 DIM = 4096
 
