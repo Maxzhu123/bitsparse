@@ -87,7 +87,7 @@ class MatmulFp8(Function):
             a_fp8.contiguous(), b_fp8,
             a_scale, b_scale, output_dtype=torch.bfloat16,
         )
-        return out
+        return out.clone()
 
     @staticmethod
     def backward(ctx, grad_output: Tensor):
