@@ -12,7 +12,7 @@ from lib_sparse.fp8 import matmul, to_fp8
 #   True  -> quantize the projected activation to fp8 + scale before saving
 #            (half the saved gradient-projection memory; fp8 matmuls).
 #   False -> save the raw bf16 projection; bf16 matmuls.
-USE_FP8 = False
+USE_FP8 = True
 
 
 def setup_hooks(model: nn.Module):

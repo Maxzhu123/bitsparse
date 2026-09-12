@@ -13,7 +13,7 @@ from lib_sparse.layers import FusedRMSNormMLP
 algos = ["LZ4", "Zstd", "Cascaded", "Bitcomp"]
 ALGO = None
 
-USE_FP8 = False
+USE_FP8 = True
 
 
 class _RMSNormFp8Linear(Function):
