@@ -24,8 +24,6 @@ class FusedRMSNormMLP(Function):
     def forward(ctx, x: Tensor, W1: Tensor, norm_weight: Tensor | None = None,
                 eps: float = 1e-6, fp8: bool = False):
         """BF16 x[..., in] and W1[out, in]; fp8 enables scaled E4M3 GEMMs."""
-        if fp8 and (x.dtype != torch.bfloat16 or W1.dtype != torch.bfloat16):
-            raise ValueError("FP8 compute requires BF16 inputs/master weights; quantization is internal.")
         normalized, rstd = torch.ops.aten._fused_rms_norm.default(
             x, [x.shape[-1]], norm_weight, eps,
         )
@@ -145,8 +143,6 @@ class RMSFFNRelu:
               eps: float = 1e-6, sparse_data: TensorBuffer | None = None,
               pack_sbit: bool = False, storage_dtype: torch.dtype = torch.bfloat16):
         """x[..., in], optional norm_weight[in], W1[ff, in], W2[out, ff]."""
-        if storage_dtype != torch.bfloat16 and not is_fp8(storage_dtype):
-            raise ValueError("storage_dtype must be bfloat16, float8_e4m3fn or float8_e5m2.")
         batch_dims = x.shape[:-1]
         x = x.reshape(-1, x.shape[-1])
         z = FusedRMSNormMLP.apply(x, W1, norm_weight, eps, is_fp8(storage_dtype))
@@ -245,8 +241,6 @@ class RMSFFNRelu2:
               eps: float = 1e-6, sparse_data: TensorBuffer | None = None,
               pack_sbit: bool = False, storage_dtype: torch.dtype = torch.bfloat16):
         """x[..., in], norm_weight[in], W1[ff, in], W2[out, ff]."""
-        if storage_dtype != torch.bfloat16 and not is_fp8(storage_dtype):
-            raise ValueError("storage_dtype must be bfloat16, float8_e4m3fn or float8_e5m2.")
         batch_dims = x.shape[:-1]
         x = x.reshape(-1, x.shape[-1])
         z = FusedRMSNormMLP.apply(x, W1, norm_weight, eps, is_fp8(storage_dtype))

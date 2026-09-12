@@ -253,7 +253,7 @@ class RMSFFN(Function):
         z.relu_()
         # Cache the activation as FP8 + scale (halves the saved memory).
         if fp8:
-            z, z_scale = to_fp8(z)
+            z, z_scale = to_fp8(z, DTYPE)
         else:
             z, z_scale = z, None
         output = matmul(z, W2.T, fp8, a_scale=z_scale)
@@ -333,7 +333,7 @@ class RMSFFNRelu2(Function):
         r = z.relu_()
         # Cache r = relu(preact) as FP8 + scale (halves the saved memory).
         if fp8:
-            r_fp8, r_scale = to_fp8(r)
+            r_fp8, r_scale = to_fp8(r, DTYPE)
         else:
             r_fp8, r_scale = r, None
         z = r.square()

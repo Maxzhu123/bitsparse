@@ -136,5 +136,5 @@ def to_fp8(x: Tensor, dtype: torch.dtype = _FP8_DTYPE) -> tuple[Tensor, Tensor]:
     """Quantize with a per-tensor scale; GEMMs default to E4M3, storage may use E5M2."""
     scale = x.detach().abs().max().float() / torch.finfo(dtype).max
     scale = scale.clamp(min=1e-9)
-    x_fp8 = (x / scale).to(dtype)
+    x_fp8 = (x.float() / scale).to(dtype)
     return x_fp8, scale
