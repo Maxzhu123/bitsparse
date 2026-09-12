@@ -71,7 +71,7 @@ class ReluLinear(Function):
 
         # Quantize input if needed
         if is_fp8(dtype):
-            h, scale = to_fp8(h, dtype)
+            h, scale = to_fp8(h)
         else:
             scale = None
 
@@ -166,7 +166,7 @@ class Relu2Linear(Function):
 
         # Quantize input if needed
         if is_fp8(storage_dtype):
-            h_stored, scale = to_fp8(h, storage_dtype)
+            h_stored, scale = to_fp8(h)
         else:
             h_stored, scale = h, None
 
