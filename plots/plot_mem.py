@@ -34,32 +34,43 @@ MARKER_SIZE = 5.5
 MARKER_EDGE_WIDTH = 1.1
 
 # Each dataset renders one figure. ``x_step`` pins the x ticks, which is what
-# keeps their labels apart once the text is scaled up.
+# keeps their labels apart once the text is scaled up. ``fit_max`` optionally
+# caps a series' fit at a given x while every measured point is still plotted.
 datasets = {
     "nemotron_mem.pdf": {
         "x_name": "Length",
         "xlabel": "Sequence length",
         "x_step": 1000.0,
+        # BitSparse's run stops at 7000 while sign-bit packing reaches 7500.
+        # Fitting the longer span gives sign-bit a steeper slope than the run it
+        # is a strict improvement on, so its fit stops at BitSparse's last
+        # measurement even though the 7500 point is still plotted.
+        "fit_max": {"Sign-bit": 7000.0},
         "table": """
 Length Base BitSparse Sign-bit Checkpoint
-50 16750 16660 16660 16652
-100 17010 16828 16828 16813
-200 17528 17165 17165 17135
-300 18047 17498 17497 17457
-400 18566 17835 17834 17779
-500 19084 18168 18167 18101
-700 20122 18839 18836 18744
-900 21254 19607 19603 19482
-1100 22540 20527 20522 20374
-1300 23825 21445 21440 21266
-1500 25111 22364 22357 22158
-2000 28326 24662 24654 24388
-2500 31540 26962 26951 26619
-3000 34754 29256 29243 28849
-3500 - 31554 31539 31079
-4000 - 33853 33835 33309
-4500 - 36149 36129 35539
-5000 - - - 37770
+50 16704 16663 16663 16655
+100 16844 16761 16760 16745
+200 17115 16950 16949 16918
+300 17387 17134 17133 17092
+400 17659 17323 17321 17265
+500 17931 17508 17505 17439
+700 18475 17882 17878 17785
+900 19018 18259 18255 18132
+1100 19562 18633 18628 18479
+1300 20105 19007 19001 18826
+1500 20649 19381 19374 19172
+2000 22008 20316 20307 20039
+2500 23367 21253 21241 20906
+3000 24727 22186 22172 21773
+3500 26086 23122 23106 22640
+4000 27446 24060 24041 23508
+4500 28809 25000 24979 24379
+5000 30172 25940 25917 25250
+5500 - 26877 26851 26144
+6000 - 27909 27881 27111
+6500 - 28942 28913 28078
+7000 - 29976 29944 29045
+7500 - - 30976 30011
 """,
     },
     "nanogpt_mem.pdf": {
@@ -68,14 +79,14 @@ Length Base BitSparse Sign-bit Checkpoint
         "x_step": 5000.0,
         "table": """
 Length Base BitSparse Sign-bit Checkpoint
-256 1297 1165 1164 1116
-512 1688 1435 1427 1286
-1024 2549 2047 2040 1853
-2048 4254 3250 3239 2990
-4096 7686 5663 5649 5270
-8192 14553 10492 10468 9834
-12000 20994 15017 14979 14104
-16384 - 20128 20080 18958
+256 1281 1148 1146 1117
+512 1653 1394 1388 1248
+1024 2484 1973 1968 1785
+2048 4114 3102 3092 2845
+4096 7398 5372 5360 4981
+8192 13977 9908 9884 9255
+12000 20142 14160 14121 13259
+16000 - 18571 18526 17427
 """,
     },
 }
@@ -107,6 +118,20 @@ def draw_fit(ax, x_values, y_values, *, color, x_max):
     ax.plot(fit_x, slope * fit_x + intercept, color=color, linestyle=":",
             linewidth=1.4)
     return slope
+
+
+def fit_points(x_values, y_values, limit):
+    """Return the points to fit, dropping any beyond ``limit``.
+
+    A ``None`` limit keeps every point. Comparing runs whose measurements stop
+    at different lengths otherwise summarises them with slopes that are not
+    comparable, so a series can be fit over a span shared with the run it is
+    measured against while its remaining points stay in the scatter.
+    """
+    if limit is None:
+        return x_values, y_values
+    kept = [(x, y) for x, y in zip(x_values, y_values) if x <= limit]
+    return [x for x, _ in kept], [y for _, y in kept]
 
 
 def equation_legend(fits):
@@ -149,8 +174,8 @@ def plot_mem(dataset):
 
     fits = [
         (name, format_equation(draw_fit(
-            ax, x_values, y_values, color=CONFIG_STYLES[name]["color"],
-            x_max=x_limits[1],
+            ax, *fit_points(x_values, y_values, dataset.get("fit_max", {}).get(name)),
+            color=CONFIG_STYLES[name]["color"], x_max=x_limits[1],
         )))
         for name, x_values, y_values in series
     ]
