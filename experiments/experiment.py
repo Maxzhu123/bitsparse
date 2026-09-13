@@ -19,7 +19,7 @@ BATCH_SIZE = 10000
 DIM = 4096
 
 # Datatype for matmul + activation caching: torch.bfloat16 or torch.float8_e4m3fn.
-DTYPE = torch.float8_e4m3fn # torch.bfloat16 #
+DTYPE = torch.bfloat16 # torch.float8_e4m3fn #
 
 # Correctness tolerance: exact for bf16, loose for the fp8 quantization error.
 CHECK_RTOL = CHECK_ATOL = 3e-6 if DTYPE == torch.bfloat16 else 1e-1
@@ -397,8 +397,8 @@ class RMSFFNRelu2(Function):
         normalized = F.rms_norm(x, x.shape[1:])
         z = matmul(normalized, W1.T, fp8)
         r = z.relu_()
-        z = r.square()
-        z.mul_(RELU2_SCALE)
+        z = r * r
+        # z.mul_(RELU2_SCALE)
         return matmul(z, W2.T, fp8)
 
 

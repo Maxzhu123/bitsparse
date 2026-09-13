@@ -56,25 +56,26 @@ if __name__ == "__main__":
     from experiments.experiment import run_batch, run_layers
     import experiments.experiment as exp
 
-    # exp.DATA_SPARSITY =  "Normal" #"Sparse"
-    # c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
+    exp.DATA_SPARSITY =  "Normal" #"Sparse"
+    c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
     # print("Running with Relu")
     # run_batch(FFNReluModel, sp_blocks=99, warmup_steps=1, eval_steps=3, batch_sizes=[32, 128, 512, 2000, 4000, 8000, 16000, 32000], save_name="./results/relu_normal.csv")
     # print(":"*75)
-    # print("Running with Relu2")
-    # run_batch(FFNRelu2Model, sp_blocks=99, warmup_steps=1, eval_steps=3, batch_sizes=[32, 128, 512, 2000, 4000, 8000, 16000, 32000], save_name="./results/relu2_normal.csv")
-    #
-    # exp.DATA_SPARSITY =  "Sparse"
-    # c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
+    print("Running with Relu2")
+    run_batch(FFNRelu2Model, sp_blocks=99, warmup_steps=1, eval_steps=3, batch_sizes=[32, 128, 512, 2000, 4000, 8000, 16000, 32000], save_name="./results/relu2_normal.csv")
+
+    exp.DATA_SPARSITY =  "Sparse"
+    c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
     # print("Running with Relu")
     # run_batch(FFNReluModel, sp_blocks=99, warmup_steps=1, eval_steps=3, batch_sizes=[32, 128, 512, 2000, 4000, 8000, 16000, 32000], save_name="./results/relu_sparse.csv")
     # print(":"*75)
-    # print("Running with Relu2")
-    # run_batch(FFNRelu2Model, sp_blocks=99, warmup_steps=1, eval_steps=3, batch_sizes=[32, 128, 512, 2000, 4000, 8000, 16000, 32000], save_name="./results/relu2_sparse.csv")
-    #
-    # # Vary number of compressed layers
-    # exp.DATA_SPARSITY =  "Normal" #"Sparse"
-    # c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
+    print("Running with Relu2")
+    run_batch(FFNRelu2Model, sp_blocks=99, warmup_steps=1, eval_steps=3, batch_sizes=[32, 128, 512, 2000, 4000, 8000, 16000, 32000], save_name="./results/relu2_sparse.csv")
+
+
+    # Vary number of compressed layers
+    exp.DATA_SPARSITY =  "Normal" #"Sparse"
+    c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
     # # Evaluate relu blocks
     # print(":"*75)
     # print("Running with Relu")
@@ -82,13 +83,13 @@ if __name__ == "__main__":
     #     print(f'{sp = }')
     #     run_batch(FFNReluModel, sp_blocks=sp, warmup_steps=1, eval_steps=3, batch_sizes=[16000], save_name="./results/relu_normal_layers.csv")
     # print(":" * 75)
-    # print("Running with Relu")
-    # for sp in range(exp.LAYERS+1):
-    #     print(f'{sp = }')
-    #     run_batch(FFNRelu2Model, sp_blocks=sp, warmup_steps=1, eval_steps=3, batch_sizes=[16000], save_name="./results/relu2_normal_layers.csv")
+    print("Running with Relu2")
+    for sp in range(exp.LAYERS+1):
+        print(f'{sp = }')
+        run_batch(FFNRelu2Model, sp_blocks=sp, warmup_steps=1, eval_steps=3, batch_sizes=[16000], save_name="./results/relu2_normal_layers.csv")
     #
-    # exp.DATA_SPARSITY =  "Sparse"
-    # c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
+    exp.DATA_SPARSITY =  "Sparse"
+    c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
     # # Evaluate relu blocks
     # print(":"*75)
     # print("Running with Relu")
@@ -96,19 +97,19 @@ if __name__ == "__main__":
     #     print(f'{sp = }')
     #     run_batch(FFNReluModel, sp_blocks=sp, warmup_steps=1, eval_steps=3, batch_sizes=[16000], save_name="./results/relu_sparse_layers.csv")
     # print(":" * 75)
-    # print("Running with Relu2")
-    # for sp in range(exp.LAYERS+1):
-    #     print(f'{sp = }')
-    #     run_batch(FFNRelu2Model, sp_blocks=sp, warmup_steps=1, eval_steps=3, batch_sizes=[16000], save_name="./results/relu2_sparse_layers.csv")
+    print("Running with Relu2")
+    for sp in range(exp.LAYERS+1):
+        print(f'{sp = }')
+        run_batch(FFNRelu2Model, sp_blocks=sp, warmup_steps=1, eval_steps=3, batch_sizes=[16000], save_name="./results/relu2_sparse_layers.csv")
 
-
-    exp.DATA_SPARSITY =  "Normal"
-    c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
-    run_batch(FFNReluModel, sp_blocks=99,  batch_sizes=[16_000], warmup_steps=1, eval_steps=3, save_name="relu_normal_fp8.csv")
-    run_batch(FFNRelu2Model, sp_blocks=99, batch_sizes=[16_000], warmup_steps=1, eval_steps=3, save_name="relu2_normal_fp8.csv")
-
-    exp.DATA_SPARSITY =  "Sparse" #"Sparse"
-    c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
-    run_batch(FFNReluModel, sp_blocks=99, batch_sizes=[16_000], warmup_steps=1, eval_steps=3, save_name="relu_sparse_fp8.csv")
-    run_batch(FFNRelu2Model, sp_blocks=99, batch_sizes=[16_000], warmup_steps=1, eval_steps=3, save_name="relu2_sparse_fp8.csv")
+    # FP8 setup
+    # exp.DATA_SPARSITY =  "Normal"
+    # c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
+    # run_batch(FFNReluModel, sp_blocks=99,  batch_sizes=[16_000], warmup_steps=1, eval_steps=3, save_name="relu_normal_fp8.csv")
+    # run_batch(FFNRelu2Model, sp_blocks=99, batch_sizes=[16_000], warmup_steps=1, eval_steps=3, save_name="relu2_normal_fp8.csv")
+    #
+    # exp.DATA_SPARSITY =  "Sparse" #"Sparse"
+    # c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
+    # run_batch(FFNReluModel, sp_blocks=99, batch_sizes=[16_000], warmup_steps=1, eval_steps=3, save_name="relu_sparse_fp8.csv")
+    # run_batch(FFNRelu2Model, sp_blocks=99, batch_sizes=[16_000], warmup_steps=1, eval_steps=3, save_name="relu2_sparse_fp8.csv")
 
