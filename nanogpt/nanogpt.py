@@ -2,8 +2,9 @@
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
-from lib_sparse.layers import FFNRelu2
+from lib_sparse.layers import FusedRMSNormMLP, Relu2Linear
 
 class RMSNorm(nn.Module):
     def __init__(self, dim):
@@ -79,25 +80,33 @@ class MLP(nn.Module):
         self.fc = Linear(dim, hdim)
         self.proj = Linear(hdim, dim)
 
-    def _forward_basic(self, x: Tensor):
-        x = self.fc(x)
+    def _forward_fc(self, x: Tensor, norm_weight: Tensor):
+        # Match F.rms_norm's default epsilon for the activation dtype.
+        x = FusedRMSNormMLP.apply(
+            x, self.fc.weight.type_as(x), norm_weight.type_as(x),
+            torch.finfo(x.dtype).eps,
+        )
+        return x + self.fc.bias.type_as(x)
+
+    def _forward_basic(self, x: Tensor, norm_weight: Tensor):
+        x = self._forward_fc(x, norm_weight)
         x = x.relu_().square()
         x = self.proj(x)
         return x
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor, norm_weight: Tensor):
 
         if self.cfg['bitsparse']:
-            W1 = self.fc.weight.type_as(x)
             W2 = self.proj.weight.type_as(x)
-            b1 = self.fc.bias.type_as(x)
             b2 = self.proj.bias.type_as(x)
-            return FFNRelu2.apply(x, W1, W2, b1=b1, b2=b2, pack_sbit=self.cfg['pack_sbit'])
+            z = self._forward_fc(x, norm_weight)
+            y = Relu2Linear.apply(z.reshape(-1, z.shape[-1]), W2, None, self.cfg['pack_sbit'])
+            return y.reshape(x.shape) + b2
         else:
             if self.cfg['checkpoint']:
-                return torch.utils.checkpoint.checkpoint(self._forward_basic, x)
+                return checkpoint(self._forward_basic, x, norm_weight, use_reentrant=True)
             else:
-                return self._forward_basic(x)
+                return self._forward_basic(x, norm_weight)
 
 
 class Block(nn.Module):
@@ -115,7 +124,7 @@ class Block(nn.Module):
 
     def forward(self, x: Tensor):
         x = x + self.attn(self.norm1(x))
-        x = x + self.mlp(self.norm2(x))
+        x = x + self.mlp(x, self.norm2.gains)
         return x
 
 

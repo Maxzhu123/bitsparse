@@ -19,7 +19,7 @@ LOG_DIR = Path("logs/2026-07-04_00-06-23")
 DATA_PATTERN = "data/fineweb10B/fineweb_val_*.bin"
 DATA_ROOT = Path.cwd()
 SEQUENCES_PER_BATCH = 4
-EVAL_STEPS = 64
+EVAL_STEPS = 16
 WARMUP_STEPS = 4
 
 
@@ -54,12 +54,6 @@ def evaluate(
     sequences_per_batch: int,
     eval_steps: int,
 ) -> tuple[float, float, int]:
-    if seq_len <= 0:
-        raise ValueError("seq_len must be positive")
-    if sequences_per_batch <= 0:
-        raise ValueError("sequences_per_batch must be positive")
-    if eval_steps <= 0:
-        raise ValueError("eval_steps must be positive")
 
     batch_size = sequences_per_batch * seq_len
     eval_tokens = batch_size * eval_steps
@@ -139,30 +133,35 @@ def evaluate_checkpoint(
 
 
 def main() -> None:
-    cfg_dict = {"bitsparse": True, "pack_sbit": True, "checkpoint": False}
-
     checkpoint = Path("~/Documents/bitsparse/nanogpt/logs/2026-07-04_00-06-23/3300.pt").expanduser()
     print(f"data: {DATA_ROOT / DATA_PATTERN}")
-    RESULTS_PATH = LOG_DIR / "compressed_sbit.csv"
-    results_file_exists = RESULTS_PATH.exists()
-    print(f"results: {RESULTS_PATH}")
 
-    sequence_lengths = [256, 512, 1024, 2048, 4096, 8192, 12000, 16384]
-    with RESULTS_PATH.open("a", newline="") as file:
-        writer = None
-        for seq_len in sequence_lengths:
-            result = evaluate_checkpoint(
-                checkpoint,
-                seq_len,
-                SEQUENCES_PER_BATCH,
-                EVAL_STEPS, cfg_dict
-            )
-            if writer is None:
-                writer = csv.DictWriter(file, fieldnames=result.keys())
-                if not results_file_exists:
-                    writer.writeheader()
-            writer.writerow(result)
-            file.flush()
+    # configs = [ {"bitsparse": True, "pack_sbit": False, "checkpoint": False},
+    #             {"bitsparse": True, "pack_sbit": True, "checkpoint": False},
+    #             {"bitsparse": False, "pack_sbit": False, "checkpoint": True},
+    #             ]
+    configs=[{"bitsparse": False, "pack_sbit": False, "checkpoint": False}]
+    for cfg_dict in configs:
+        RESULTS_PATH = LOG_DIR / f"bitsparse_{cfg_dict['bitsparse']}_sbit_{cfg_dict['pack_sbit']}_ckpt_{cfg_dict['checkpoint']}.csv"
+        results_file_exists = RESULTS_PATH.exists()
+        print(f"results: {RESULTS_PATH}")
+
+        sequence_lengths = [256, 512, 1024, 2048, 4096, 8192, 12000, 16000]
+        with RESULTS_PATH.open("a", newline="") as file:
+            writer = None
+            for seq_len in sequence_lengths:
+                result = evaluate_checkpoint(
+                    checkpoint,
+                    seq_len,
+                    SEQUENCES_PER_BATCH,
+                    EVAL_STEPS, cfg_dict
+                )
+                if writer is None:
+                    writer = csv.DictWriter(file, fieldnames=result.keys())
+                    if not results_file_exists:
+                        writer.writeheader()
+                writer.writerow(result)
+                file.flush()
 
 
 if __name__ == "__main__":

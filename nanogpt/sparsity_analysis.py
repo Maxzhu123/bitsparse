@@ -19,7 +19,7 @@ from torch import Tensor, nn
 
 from dataloader import data_generator
 from nanogpt import GPT
-from try_gpt import get_state_dict, infer_model_config
+from eval_gpt import get_state_dict, infer_model_config
 
 
 LOG_DIR = Path("logs/2026-07-04_00-06-23")
