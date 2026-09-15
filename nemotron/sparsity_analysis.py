@@ -1,307 +1,226 @@
+"""Measure Nemotron's retained ReLU values on re-tokenized FineWeb text.
+
+Run from the repository root with `python -m nemotron.sparsity_analysis`.
+Sparsity means the fraction of zero ReLU activations; density is reported
+separately. Samples are spread across the validation shards, without wrapping.
 """
-sparsity_analysis.py
-
-Measure the counting sparsity (fraction of zero activations) of the ReLU²
-feed-forward activations in a Nemotron-H checkpoint, over several sequences
-drawn from the FineWeb10B validation shards.
-
-Nemotron-H is a hybrid model: only the `layers_block_type == "mlp"` blocks
-contain a `NemotronHMLP`, and its `act_fn` is `ReLUSquaredActivation`
-(`relu(x)²`). We hook that activation module directly, so the measured tensor is
-exactly what the FFN consumes.
-
-For every MLP layer we track:
-  * average sparsity - the running mean nonzero fraction across batches.
-  * worst sparsity   - the densest (most nonzero) batch, i.e. the worst case
-                       for a compression scheme that must fit every batch.
-
-The tracker mirrors the counting-sparsity tracker used in
-bitsparse/nanogpt/sparsity_analysis.py (itself ported from
-optimizer/modded-nanogpt/try_gpt.py).
-"""
-
 import csv
 import os
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, cast
-
-import torch
-from torch import Tensor, nn
-
-from llm import NemotronHForCausalLM
-
 
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
+import tiktoken
+import torch
+from torch import Tensor
+from transformers import AutoTokenizer
+
+from nemotron import llm
+
 MODEL_NAME = "nvidia/Nemotron-H-8B-Base-8K"
 RESULTS_PATH = Path(__file__).resolve().parent / "sparsity.csv"
-
-# FineWeb10B shards. Each file is a 256-int32 header followed by uint16 tokens.
-DATA_ROOT = Path(
-    os.environ.get("FINEWEB_ROOT", "/home/bubbles/Documents/bitsparse/nanogpt/data")
-)
+DATA_ROOT = Path(os.environ.get("FINEWEB_ROOT", str(Path(__file__).resolve().parents[1] / "nanogpt/data")))
 DATA_PATTERN = "fineweb10B/fineweb_val_*.bin"
 SHARD_HEADER_INTS = 256
 SHARD_MAGIC = 20240520
 SHARD_VERSION = 1
-
-# The Mamba/RMSNorm hub kernels are only a speed optimisation and are not
-# required for measuring sparsity, so fall back to the torch path when the
-# `kernels` package is unavailable or older than 0.9.0.
-USE_KERNELS = False
-
-# Measurement config: each batch contains BATCH_SIZE sequences of SEQ_LEN tokens.
 BATCH_SIZE = 1
 SEQ_LEN = 8000
 NUM_BATCHES = 256
-# Warmup batches are excluded from NUM_BATCHES and the reported statistics.
 WARMUP_STEPS = 1
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class ActivationSparsityTracker:
-    """Accumulate the average and worst-case nonzero fraction of activations."""
+    """Count positive preactivations: exactly the values retained by bitsparse."""
 
     def __init__(self, num_layers: int):
         self.num_layers = num_layers
-        self.average: dict[int, Tensor] = {}
-        self.worst: dict[int, Tensor] = {}
-        self.counts: dict[int, int] = {}
-        self.batch_sparsity: dict[int, Tensor] = {}
-        self.worst_batch_avg: Tensor | None = None
-
-    @torch.no_grad()
-    def update(self, layer_num: int, x: Tensor) -> None:
-        ratio = ((x != 0).sum() / x.numel()).detach()
-
-        if layer_num not in self.average:
-            self.average[layer_num] = ratio
-            self.worst[layer_num] = ratio
-            self.counts[layer_num] = 1
-        else:
-            count = self.counts[layer_num]
-            self.average[layer_num] += (ratio - self.average[layer_num]) / (count + 1)
-            self.worst[layer_num] = torch.maximum(self.worst[layer_num], ratio)
-            self.counts[layer_num] = count + 1
-
-        self._update_batch(layer_num, ratio)
-
-    def _update_batch(self, layer_num: int, ratio: Tensor) -> None:
-        """Track the densest whole-model batch once every layer has reported."""
-        self.batch_sparsity[layer_num] = ratio
-        if len(self.batch_sparsity) != self.num_layers:
-            return
-
-        batch_avg = torch.stack(list(self.batch_sparsity.values())).mean()
-        if self.worst_batch_avg is None:
-            self.worst_batch_avg = batch_avg
-        else:
-            self.worst_batch_avg = torch.maximum(self.worst_batch_avg, batch_avg)
-        self.batch_sparsity.clear()
+        self.reset()
 
     def reset(self) -> None:
-        self.average.clear()
-        self.worst.clear()
-        self.counts.clear()
-        self.batch_sparsity.clear()
-        self.worst_batch_avg = None
+        self.nonzeros: dict[int, Tensor] = {}
+        self.elements: dict[int, int] = {}
+        self.counts: dict[int, int] = {}
+        self.worst: dict[int, Tensor] = {}
+        self.batch_counts: dict[int, tuple[Tensor, int]] = {}
+        self.batch_sparsities: list[Tensor] = []
+
+    @torch.no_grad()
+    def update(self, layer_num: int, preactivation: Tensor) -> None:
+        count = (preactivation > 0).sum(dtype=torch.int64)
+        size = preactivation.numel()
+        sparsity = 1 - count.double() / size
+        if layer_num not in self.nonzeros:
+            self.nonzeros[layer_num] = count
+            self.elements[layer_num] = size
+            self.counts[layer_num] = 1
+            self.worst[layer_num] = sparsity
+        else:
+            self.nonzeros[layer_num] += count
+            self.elements[layer_num] += size
+            self.counts[layer_num] += 1
+            self.worst[layer_num] = torch.minimum(self.worst[layer_num], sparsity)
+        if layer_num in self.batch_counts:
+            raise RuntimeError("An MLP was counted twice in one forward pass")
+        self.batch_counts[layer_num] = (count, size)
+        if len(self.batch_counts) == self.num_layers:
+            nonzeros = torch.stack([v[0] for v in self.batch_counts.values()]).sum()
+            elements = sum(v[1] for v in self.batch_counts.values())
+            self.batch_sparsities.append(1 - nonzeros.double() / elements)
+            self.batch_counts.clear()
 
     def average_as_floats(self) -> dict[int, float]:
-        return {layer_num: value.item() for layer_num, value in sorted(self.average.items())}
+        return {layer: 1 - count.item() / self.elements[layer]
+                for layer, count in sorted(self.nonzeros.items())}
 
     def worst_as_floats(self) -> dict[int, float]:
-        return {layer_num: value.item() for layer_num, value in sorted(self.worst.items())}
+        return {layer: value.item() for layer, value in sorted(self.worst.items())}
 
     def average_overall(self) -> float:
-        values = self.average_as_floats()
-        return sum(values.values()) / max(len(values), 1)
+        return 1 - sum(v.item() for v in self.nonzeros.values()) / sum(self.elements.values())
 
     def worst_overall(self) -> float:
-        values = self.worst_as_floats()
-        return max(values.values(), default=float("nan"))
+        return min(self.worst_as_floats().values())
 
     def worst_batch_avg_as_float(self) -> float:
-        if self.worst_batch_avg is None:
-            return float("nan")
-        return self.worst_batch_avg.item()
+        return torch.stack(self.batch_sparsities).min().item()
 
 
-def mlp_layer_indices(model: NemotronHForCausalLM) -> list[int]:
-    """Layer indices whose block type is an MLP (i.e. contains a ReLU² FFN)."""
-    return [
-        layer_idx
-        for layer_idx, block in enumerate(model.model.layers)
-        if block.block_type == "mlp"
-    ]
+@contextmanager
+def attach_sparsity_tracker(model: llm.NemotronHForCausalLM):
+    """Observe the fused dense FFN without recomputing its projection.
 
+    up_proj and act_fn module hooks do not see this path: the FFN uses
+    FusedRMSNormMLP and _DenseRelu2Linear autograd Functions directly.
+    Restore the temporary observer even if model execution fails.
+    """
+    indices = [i for i, block in enumerate(model.model.layers) if block.block_type == "mlp"]
+    if not indices:
+        raise ValueError("Model contains no MLP blocks")
+    tracker = ActivationSparsityTracker(len(indices))
+    current_layer = None
+    handles = []
+    original = llm._DenseRelu2Linear.forward
 
-def _make_hook(tracker: ActivationSparsityTracker, layer_num: int) -> Any:
-    """Report the output of a block's ReLU² activation module."""
+    def select_layer(index):
+        def hook(module, inputs):
+            nonlocal current_layer
+            current_layer = index
+        return hook
 
-    def hook(module: nn.Module, inputs: tuple[Tensor, ...], output: Tensor) -> None:
-        tracker.update(layer_num, output.detach())
+    def observe(ctx, z, down_weight, down_bias):
+        tracker.update(current_layer, z)
+        return original(ctx, z, down_weight, down_bias)
 
-    return hook
-
-
-def attach_sparsity_tracker(
-    model: NemotronHForCausalLM,
-) -> tuple[ActivationSparsityTracker, list[Any]]:
-    """Hook every MLP block's ReLU² activation and return the tracker + handles."""
-    layer_indices = mlp_layer_indices(model)
-    if not layer_indices:
-        raise ValueError("Model contains no 'mlp' blocks to measure")
-
-    tracker = ActivationSparsityTracker(len(layer_indices))
-    handles = [
-        model.model.layers[layer_idx].mixer.act_fn.register_forward_hook(
-            _make_hook(tracker, layer_idx)
-        )
-        for layer_idx in layer_indices
-    ]
-    return tracker, handles
+    try:
+        for index in indices:
+            handles.append(model.model.layers[index].mixer.register_forward_pre_hook(select_layer(index)))
+        llm._DenseRelu2Linear.forward = staticmethod(observe)
+        yield tracker
+    finally:
+        llm._DenseRelu2Linear.forward = staticmethod(original)
+        for handle in handles:
+            handle.remove()
 
 
 def load_shard(path: Path) -> Tensor:
-    """Load one FineWeb10B .bin shard into CPU memory as uint16 tokens."""
+    """Memory-map the GPT-2-tokenized validation shard on CPU."""
     header = torch.from_file(str(path), False, SHARD_HEADER_INTS, dtype=torch.int32)
-    if int(header[0]) != SHARD_MAGIC:
-        raise ValueError(f"bad magic number in {path}")
-    if int(header[1]) != SHARD_VERSION:
-        raise ValueError(f"unsupported version in {path}")
-
+    if int(header[0]) != SHARD_MAGIC or int(header[1]) != SHARD_VERSION:
+        raise ValueError(f"Invalid FineWeb shard header: {path}")
     num_tokens = int(header[2])
-    tokens = torch.empty(num_tokens, dtype=torch.uint16)
-    with path.open("rb", buffering=0) as file:
-        file.seek(SHARD_HEADER_INTS * 4)
-        num_bytes = file.readinto(tokens.numpy())
-    if num_bytes != 2 * num_tokens:
-        raise ValueError(f"short read in {path}")
-    return tokens
+    header_tokens = SHARD_HEADER_INTS * 2
+    if path.stat().st_size != (num_tokens + header_tokens) * 2:
+        raise ValueError(f"Invalid shard size: {path}")
+    return torch.from_file(str(path), False, num_tokens + header_tokens, dtype=torch.uint16)[header_tokens:]
 
 
-def sequence_batches(
-    seq_len: int,
-    batch_size: int,
-    num_batches: int,
-) -> Iterator[Tensor]:
-    """Yield contiguous `batch_size` x `seq_len` windows from the shards."""
+def sequence_batches(tokenizer, seq_len: int, batch_size: int, num_batches: int) -> Iterator[Tensor]:
+    """Decode GPT-2 IDs, then encode text using Nemotron's own vocabulary."""
     files = sorted(DATA_ROOT.glob(DATA_PATTERN))
     if not files:
-        raise FileNotFoundError(f"No shards matched {DATA_PATTERN!r} under {DATA_ROOT}")
-
-    batch_tokens = batch_size * seq_len
-    file_index = 0
-    tokens = load_shard(files[file_index])
-    pos = 0
-
-    for _ in range(num_batches):
-        # Advance across shard boundaries, wrapping around at the end.
-        while pos + batch_tokens > tokens.numel():
-            file_index = (file_index + 1) % len(files)
-            tokens = load_shard(files[file_index])
-            pos = 0
-
-        windows = tokens[pos : pos + batch_tokens].view(batch_size, seq_len)
-        pos += batch_tokens
-        yield windows.to(device=DEVICE, dtype=torch.long)
+        raise FileNotFoundError(f"No shards matched {DATA_ROOT / DATA_PATTERN}")
+    source_tokenizer = tiktoken.get_encoding("gpt2")
+    shards = [load_shard(path) for path in files]
+    sequences = batch_size * num_batches
+    source_length = 4 * seq_len  # Enough text to fill a Nemotron window.
+    batch = []
+    for index in range(sequences):
+        shard_index = index % len(shards)
+        shard = shards[shard_index]
+        in_shard = index // len(shards)
+        samples_in_shard = (sequences - 1 - shard_index) // len(shards) + 1
+        stride = (shard.numel() - source_length) // max(samples_in_shard - 1, 1)
+        if stride < source_length:
+            raise ValueError("Not enough validation text for non-overlapping samples")
+        start = in_shard * stride
+        text = source_tokenizer.decode(shard[start:start + source_length].tolist())
+        text = text.replace(source_tokenizer.decode([source_tokenizer.eot_token]), tokenizer.eos_token)
+        ids = tokenizer(text, add_special_tokens=False, truncation=True, max_length=seq_len)["input_ids"]
+        if len(ids) != seq_len:
+            raise ValueError("Decoded source window is too short after re-tokenization")
+        batch.append(ids)
+        if len(batch) == batch_size:
+            yield torch.tensor(batch, device="cuda", dtype=torch.long)
+            batch.clear()
 
 
 @torch.no_grad()
-def measure_sparsity(
-    model: NemotronHForCausalLM,
-    tracker: ActivationSparsityTracker,
-    seq_len: int,
-    batch_size: int,
-    num_batches: int,
-) -> None:
-    """Run the model over FineWeb sequences and accumulate sparsity stats."""
+def measure_sparsity(model, tracker, tokenizer, seq_len, batch_size, num_batches):
     model.eval()
-
-    # All sparsity hooks are in the backbone; skip vocabulary logits and loss.
-    for inputs in sequence_batches(seq_len, batch_size, WARMUP_STEPS):
-        model.model(input_ids=inputs, use_cache=False)
-
+    batches = sequence_batches(tokenizer, seq_len, batch_size, num_batches + WARMUP_STEPS)
+    for _ in range(WARMUP_STEPS):
+        model.model(input_ids=next(batches), use_cache=False)
     tracker.reset()
-    for inputs in sequence_batches(seq_len, batch_size, num_batches):
+    for index, inputs in enumerate(batches, 1):
         model.model(input_ids=inputs, use_cache=False)
+        print(f"batch {index}/{num_batches}: zero fraction {tracker.batch_sparsities[-1].item():.4%}", flush=True)
+    if len(tracker.batch_sparsities) != num_batches or any(n != num_batches for n in tracker.counts.values()):
+        raise RuntimeError("Incomplete activation measurements")
 
 
-def analyze(
-    *,
-    batch_size: int = BATCH_SIZE,
-    seq_len: int = SEQ_LEN,
-    num_batches: int = NUM_BATCHES,
-) -> dict[str, float | int | str]:
-    """Measure `num_batches` batches of `batch_size` sequences of `seq_len` tokens."""
-    for name, value in (
-        ("batch_size", batch_size),
-        ("seq_len", seq_len),
-        ("num_batches", num_batches),
-    ):
+def analyze(*, batch_size=BATCH_SIZE, seq_len=SEQ_LEN, num_batches=NUM_BATCHES):
+    for name, value in (("batch_size", batch_size), ("seq_len", seq_len), ("num_batches", num_batches)):
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
-
-    if torch.device(DEVICE).type != "cuda" and os.environ.get("ALLOW_CPU") != "1":
-        raise RuntimeError(
-            "No usable CUDA device found (is the NVIDIA driver loaded?). Running an "
-            "8B model on CPU is not practical; set ALLOW_CPU=1 to force it."
-        )
-
-    dtype = torch.bfloat16 if torch.device(DEVICE).type == "cuda" else torch.float32
+    if not torch.cuda.is_available():
+        raise RuntimeError("Nemotron sparsity analysis requires CUDA")
     torch.set_float32_matmul_precision("high")
-
-    print(f"model: {MODEL_NAME}")
-    print(f"data: {DATA_ROOT / DATA_PATTERN}")
-    model: NemotronHForCausalLM = cast(
-        NemotronHForCausalLM,
-        NemotronHForCausalLM.from_pretrained(
-            MODEL_NAME, dtype=dtype, trust_remote_code=True, use_kernels=USE_KERNELS
-        ).to(DEVICE),
-    )
-
-    # Plain dense forward so the forward hooks see the real activations.
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, local_files_only=True)
+    print(f"model: {MODEL_NAME}\ndata: {DATA_ROOT / DATA_PATTERN}", flush=True)
+    model = llm.NemotronHForCausalLM.from_pretrained(
+        MODEL_NAME, dtype=torch.bfloat16, local_files_only=True,
+    ).cuda()
     model.config.sparse_ffn = False
     model.config.use_ckpt = False
-
-    tracker, handles = attach_sparsity_tracker(model)
-    measure_sparsity(model, tracker, seq_len, batch_size, num_batches)
-
-    result: dict[str, float | int | str] = {
-        "model": MODEL_NAME,
-        "seq_len": seq_len,
-        "batch_size": batch_size,
-        "num_batches": num_batches,
-        "sequences": batch_size * num_batches,
-        "avg_sparsity": tracker.average_overall(),
-        "worst_sparsity": tracker.worst_overall(),
-        "worst_batch_avg_sparsity": tracker.worst_batch_avg_as_float(),
-    }
-    worst = tracker.worst_as_floats()
-    for layer_num, sparsity in tracker.average_as_floats().items():
-        result[f"layer_{layer_num}_avg_sparsity"] = sparsity
-        result[f"layer_{layer_num}_worst_sparsity"] = worst[layer_num]
-
-    for handle in handles:
-        handle.remove()
-    del model
-    if torch.device(DEVICE).type == "cuda":
+    try:
+        with attach_sparsity_tracker(model) as tracker:
+            measure_sparsity(model, tracker, tokenizer, seq_len, batch_size, num_batches)
+        average = tracker.average_overall()
+        result = dict(model=MODEL_NAME, seq_len=seq_len, batch_size=batch_size,
+                      num_batches=num_batches, sequences=batch_size*num_batches,
+                      tokens=seq_len*batch_size*num_batches,
+                      source_tokenizer="gpt2", model_tokenizer=MODEL_NAME,
+                      avg_sparsity=average, avg_nonzero_fraction=1-average,
+                      worst_sparsity=tracker.worst_overall(),
+                      worst_batch_avg_sparsity=tracker.worst_batch_avg_as_float())
+        worst = tracker.worst_as_floats()
+        for layer, sparsity in tracker.average_as_floats().items():
+            result[f"layer_{layer}_avg_sparsity"] = sparsity
+            result[f"layer_{layer}_worst_sparsity"] = worst[layer]
+            print(f"layer {layer:2d}: {sparsity:.4%} zeros", flush=True)
+        print(f"Average sparsity: {average:.4%}; nonzeros: {1-average:.4%}", flush=True)
+        print(f"Densest batch sparsity: {result['worst_batch_avg_sparsity']:.4%}", flush=True)
+        return result
+    finally:
+        del model
         torch.cuda.empty_cache()
 
-    avg_sparsity = float(result["avg_sparsity"])
-    worst_batch_avg = float(result["worst_batch_avg_sparsity"])
-    print(
-        f"  layers: {len(tracker.average)}, sequences: {result['sequences']}\n"
-        f"  avg sparsity:    {avg_sparsity:.4f}\n"
-        f"  worst batch avg: {worst_batch_avg:.4f}"
-    )
-    return result
 
-
-def main() -> None:
+def main():
     result = analyze()
-
     with RESULTS_PATH.open("w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=result.keys())
         writer.writeheader()
@@ -310,5 +229,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    torch.set_printoptions(precision=6)
     main()

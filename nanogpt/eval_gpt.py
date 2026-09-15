@@ -23,6 +23,16 @@ EVAL_STEPS = 16
 WARMUP_STEPS = 4
 
 
+def setup_hooks(model: GPT) -> None:
+    """Simulate an optimiser that releases gradients immediately, without updates."""
+    def hook(parameter: Tensor) -> None:
+        parameter.grad = None
+
+    for parameter in model.parameters():
+        if parameter.requires_grad:
+            parameter.register_post_accumulate_grad_hook(hook)
+
+
 def get_state_dict(checkpoint_path: Path) -> dict[str, Tensor]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     if isinstance(checkpoint, dict) and "model" in checkpoint:
@@ -110,6 +120,7 @@ def evaluate_checkpoint(
     )
     model.load_state_dict(state_dict)
     model.cuda()
+    setup_hooks(model)
 
     loss, avg_time, peak_memory = evaluate(
         model,

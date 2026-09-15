@@ -12,13 +12,13 @@ from lib_sparse.fp8 import matmul, to_fp8
 #   True  -> quantize the projected activation to fp8 + scale before saving
 #            (half the saved gradient-projection memory; fp8 matmuls).
 #   False -> save the raw bf16 projection; bf16 matmuls.
-USE_FP8 = True
+USE_FP8 = False
 
 
 def setup_hooks(model: nn.Module):
     """ Simulate hook optimiser that applies update + clears grads immediately."""
     def hook(w):
-        if hasattr(w, "small_grad"):
+        if getattr(w, "small_grad", None) is not None:
             # Decode gradient
             grad_W = w.projector.decode(
                 w.small_grad
@@ -171,12 +171,12 @@ class _CompActLinear(torch.autograd.Function):
 
         grad_weight_small = matmul(grad_output.T, x_small, USE_FP8)
 
-        weight.small_grad = grad_weight_small
+        grad_weight = weight.projector.decode(grad_weight_small)
         if raw_x is not None and ctx.needs_input_grad[0]:
             grad_x = torch.ops.aten._fused_rms_norm_backward.default(
                 grad_x, raw_x, raw_x.shape[1:], rstd, None, [True, False],
             )[0]
-        return grad_x, None, None, None
+        return grad_x, grad_weight, None, None
 
 
 # ---------------------------------------------------------
@@ -221,7 +221,7 @@ class FFN(nn.Module):
     # @torch.compile()
     def forward_relu2(self, x):
         x = self.lin1(x, rms_norm=True)
-        x.relu()
+        x = x.relu()
         x = x.square()
         x = self.lin2(x)
         return x
