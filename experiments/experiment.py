@@ -25,7 +25,7 @@ DTYPE = torch.bfloat16 # torch.float8_e4m3fn #
 CHECK_RTOL = CHECK_ATOL = 3e-6 if DTYPE == torch.bfloat16 else 1e-1
 
 BASIC_MODE = True
-DATA_SPARSITY = "Normal"        # "Normal", "Sparse", "ReLU"
+DATA_SPARSITY = "Normal"        # "Normal", "Sparse", "Sparse90"
 c_print(f'{DATA_SPARSITY = }', color="green")
 # ------------------------------------------------------------------------------
 # Evaluation Loop
@@ -229,8 +229,9 @@ def gen_params(dim, G, dtype, expansion=5.25, device="cuda"):
         W2 = W2 - 0.01 * shift * W2.std()
     elif DATA_SPARSITY == "Sparse":
         W1 = W1 + 0.1 * W1.std()        # 80% sparsity with ReLU2
-    elif DATA_SPARSITY == "ReLU":
-        W1 = W1 + 0.1 * W1.std()        # 80% sparsity with ReLU
+    elif DATA_SPARSITY == "Sparse90":
+        # ~88.5% ReLU² / ~91.8% ReLU mean zeros: 8 BF16 layers, dim=4096, expansion=5.25.
+        W1 = W1 + 0.23 * W1.std()
     else:
         raise NotImplementedError("Unknown sparsity type")
 

@@ -308,12 +308,12 @@ if __name__ == "__main__":
     import experiments.experiment as exp
     from cprint import c_print
 
-    for sparsity in ["Sparse", "Normal"]:
+    for sparsity, suffix in [("Sparse90", "sparse_90"), ("Normal", "Normal")]:
         exp.DATA_SPARSITY =  sparsity
         c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
 
         print(f'running with relu')
-        with open(f"./results/relu_nvcomp_{sparsity}.csv", "a", newline="") as f:
+        with open(f"./results/relu_nvcomp_{suffix}.csv", "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "method", "vram", "avg_time",
@@ -327,7 +327,7 @@ if __name__ == "__main__":
                 f.flush()
 
         print(f'Running with relu2')
-        with open(f"./results/relu2_nvcomp_{sparsity}.csv", "a", newline="") as f:
+        with open(f"./results/relu2_nvcomp_{suffix}.csv", "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "method", "vram", "avg_time",

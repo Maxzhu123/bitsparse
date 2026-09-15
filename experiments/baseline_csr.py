@@ -164,8 +164,11 @@ class FFNRelu2CSR(FFNRelu2ABC):
 
 if __name__ == "__main__":
     from experiments.experiment import evaluate_nobase
+    import experiments.experiment as exp
 
-    with open("./results/relu2_csr.csv", "a", newline="") as f:
+    exp.DATA_SPARSITY = "Sparse90"
+
+    with open("./results/relu2_csr_sparse_90.csv", "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
             "method", "vram", "avg_time",
@@ -177,7 +180,7 @@ if __name__ == "__main__":
             f.flush()
 
             # exit(7)
-    with open("./results/relu_csr.csv", "a", newline="") as f:
+    with open("./results/relu_csr_sparse_90.csv", "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
             "method", "vram", "avg_time",
