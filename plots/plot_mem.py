@@ -95,15 +95,17 @@ Length Base BitSparse Sign-bit Checkpoint
 def format_equation(slope):
     """Return a fitted line as a ``y = ax + C`` label.
 
-    The slope is quoted per 1000 input tokens, which keeps its leading digits
-    readable instead of a long run of zeros. Three decimals are kept because the
+    The fit is taken against the plotted y values, which are in GiB, so the slope
+    arrives in GiB per token. The label quotes it in MiB per token, the unit the
+    surrounding text uses; the two are a factor of ``MIB_PER_GIB`` apart, not the
+    factor of 1000 a decimal prefix would suggest. Three decimals are kept because the
     optimised runs differ by less than that, so rounding to two would print the
     same equation for two different runs.
 
     The intercept collapses to ``C``: it captures the model's fixed footprint,
     which is much the same for every run and so adds nothing to the comparison.
     """
-    return f"$y = {slope * 1000:.3f}x + C$"
+    return f"$y = {slope * MIB_PER_GIB:.3f}x + C$"
 
 
 def draw_fit(ax, x_values, y_values, *, color, x_max):
