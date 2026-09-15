@@ -71,7 +71,7 @@ NEUTRAL_COLOR = "#333333"
 # plotted. The hues are Okabe-Ito, which stay distinct for colourblind readers,
 # and the markers stay distinguishable in greyscale.
 CONFIG_STYLES = {
-    "Base": {"color": NEUTRAL_COLOR, "marker": "o"},
+    "Dense": {"color": NEUTRAL_COLOR, "marker": "o"},
     "BitSparse": {"color": "#0072B2", "marker": "s"},
     "Sign-bit": {"color": "#D55E00", "marker": "^"},
     "Checkpoint": {"color": "#009E73", "marker": "D"},

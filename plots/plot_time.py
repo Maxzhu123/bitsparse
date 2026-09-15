@@ -41,7 +41,7 @@ datasets = {
         "y_scale": 1.0,
         "x_step": 1000.0,
         "table": """
-Length Base BitSparse Sign-bit Checkpoint
+Length Dense BitSparse Sign-bit Checkpoint
 50 68 75 84 82
 100 71 75 89 84
 200 71 79 83 83
@@ -76,7 +76,7 @@ Length Base BitSparse Sign-bit Checkpoint
         "x_scale": 4.0,
         "x_step": 20000.0,
         "table": """
-Length Base BitSparse Sign-bit Checkpoint
+Length Dense BitSparse Sign-bit Checkpoint
 256 0.022 0.025 0.025 0.025
 512 0.038 0.038 0.039 0.043
 1024 0.068 0.070 0.072 0.078
