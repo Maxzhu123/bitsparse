@@ -52,6 +52,7 @@ def _compute_scale(dense: Tensor, storage_dtype: torch.dtype) -> Tensor:
     return torch.where(scale == 0, torch.ones_like(scale), scale)
 
 
+@torch.compiler.disable
 def dense_to_tilesparse(
     dense: Tensor, scale: Tensor|None,
     sparse_data: TensorBuffer | None = None,

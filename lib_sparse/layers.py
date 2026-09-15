@@ -6,12 +6,12 @@ from torch.autograd import Function
 from .src.functions import dense_to_tilesparse
 from .src.sparse_matmul import AspB, AspRelu2B
 from .src.triton_operators import mask_with_bitmask_, relu2_grad_sparse_
-from .bitsparse import BitsparseTensor
+from .bitsparse import BitsparseTensor, TensorBuffer
 from .fp8 import is_fp8, matmul, to_fp8
 from .config import RELU2_SCALE
 
 if TYPE_CHECKING:
-    from bitsparse import TensorBuffer
+    from .bitsparse import TensorBuffer
 
 
 # ------------------------------------------------------------
@@ -180,7 +180,7 @@ class Relu2Linear(Function):
         return y
 
     @staticmethod
-    @torch.compiler.disable
+    # @torch.compiler.disable
     def backward(ctx, grad_output: Tensor):
         """Compute gradients."""
         W = ctx.saved_tensors[0]
