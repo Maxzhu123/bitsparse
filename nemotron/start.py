@@ -47,6 +47,8 @@ def calculate_loss(model: NemotronHForCausalLM, text, tokenizer, device, max_tok
 
 
 def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
+    steps = 5
+
     model.train()
     sparse_data = model.config.sparse_data
 
@@ -64,7 +66,7 @@ def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
     # c_print("Starting Timing Run", color="cyan")
     torch.cuda.synchronize()
     st = time.perf_counter()
-    for _ in range(5):
+    for _ in range(steps):
         if sparse_data is not None:
             sparse_data.reset_buffer()
         loss = calculate_loss(model, prompt, tokenizer, device, max_tokens=train_tokens)
@@ -73,7 +75,7 @@ def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
     torch.cuda.synchronize()
     et = time.perf_counter()
 
-    total_time = 1000 * (et - st) / 10
+    total_time = 1000 * (et - st) / steps
     print(f"Total Time: {total_time:.4f} ms")
 
     # Record memory usage
