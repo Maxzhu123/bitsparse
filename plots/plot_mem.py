@@ -1,9 +1,9 @@
-"""Peak VRAM against sequence length for the language-model runs.
+"""Peak VRAM against the number of tokens per step for the language-model runs.
 
 Each dataset is a table of measured peak VRAM, one column per configuration.
 Every run is scattered and overlaid with a least-squares line of best fit, so the
-rate at which activation memory grows with the sequence length can be compared
-across the configurations. Runs stop at different sequence lengths, so a gap is
+rate at which activation memory grows with the token count can be compared
+across the configurations. Runs stop at different token counts, so a gap is
 written as ``MISSING`` and the fit spans only what was actually measured.
 
 Each fit is then extrapolated to the right edge of the plot, which keeps the
@@ -36,10 +36,15 @@ MARKER_EDGE_WIDTH = 1.1
 # Each dataset renders one figure. ``x_step`` pins the x ticks, which is what
 # keeps their labels apart once the text is scaled up. ``fit_max`` optionally
 # caps a series' fit at a given x while every measured point is still plotted.
+# ``x_scale`` converts the table's x column onto the plotted axis: the harnesses
+# disagree on what an x value counts, so each dataset carries its own factor.
+# Fitting on the plotted axis keeps every legend slope in MiB per token.
 datasets = {
     "nemotron_mem.pdf": {
         "x_name": "Length",
-        "xlabel": "Sequence length",
+        # The Nemotron harness processes one sequence per step, so its sequence
+        # length is already its token count.
+        "xlabel": "Tokens",
         "x_step": 1000.0,
         # BitSparse's run stops at 7000 while sign-bit packing reaches 7500.
         # Fitting the longer span gives sign-bit a steeper slope than the run it
@@ -75,8 +80,12 @@ Length Base BitSparse Sign-bit Checkpoint
     },
     "nanogpt_mem.pdf": {
         "x_name": "Length",
-        "xlabel": "Sequence length",
-        "x_step": 5000.0,
+        # The nanoGPT harness packs four sequences into every step, so a step
+        # covers four times the sequence length in tokens. Scaling x here is what
+        # puts the fitted slope on a per-token footing.
+        "xlabel": "Tokens",
+        "x_scale": 4.0,
+        "x_step": 20000.0,
         "table": """
 Length Base BitSparse Sign-bit Checkpoint
 256 1281 1148 1146 1117
@@ -162,6 +171,10 @@ def plot_mem(dataset):
         dataset["table"], x_name=dataset["x_name"], y_scale=1 / MIB_PER_GIB,
     )
 
+    x_scale = dataset.get("x_scale", 1.0)
+    if x_scale != 1.0:
+        series = [(name, [x * x_scale for x in xs], ys)
+                  for name, xs, ys in series]
     fig, ax = plt.subplots()
     plot_series(
         ax, series, linestyle="none",

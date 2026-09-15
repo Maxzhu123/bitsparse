@@ -1,8 +1,8 @@
-"""Wall-clock time against sequence length for the language-model runs.
+"""Wall-clock time against the number of tokens per step for the language-model runs.
 
 Each dataset is a table of measured step times, one column per configuration.
 Every run is drawn as its own line, so the cost of each configuration can be read
-directly against the dense baseline. Runs stop at different sequence lengths, so
+directly against the dense baseline. Runs stop at different token counts, so
 a gap is written as ``MISSING`` and the line simply ends there.
 
 Both figures are drawn in milliseconds. The harnesses disagree on units, so each
@@ -29,11 +29,15 @@ YFORMAT = "{x:,.0f}"
 MS_PER_S = 1000.0
 
 # Each dataset renders one figure. ``x_step`` pins the x ticks, which is what
-# keeps their labels apart once the text is scaled up.
+# keeps their labels apart once the text is scaled up. ``x_scale`` converts the
+# table's x column onto the plotted axis: the harnesses disagree on what an x
+# value counts, so each dataset carries its own factor.
 datasets = {
     "nemotron_time.pdf": {
         "x_name": "Length",
-        "xlabel": "Sequence length",
+        # The Nemotron harness processes one sequence per step, so its sequence
+        # length is already its token count.
+        "xlabel": "Tokens",
         "y_scale": 1.0,
         "x_step": 1000.0,
         "table": """
@@ -65,9 +69,12 @@ Length Base BitSparse Sign-bit Checkpoint
     },
     "nanogpt_time.pdf": {
         "x_name": "Length",
-        "xlabel": "Sequence length",
+        # The nanoGPT harness packs four sequences into every step, so a step
+        # covers four times the sequence length in tokens.
+        "xlabel": "Tokens",
         "y_scale": MS_PER_S,
-        "x_step": 5000.0,
+        "x_scale": 4.0,
+        "x_step": 20000.0,
         "table": """
 Length Base BitSparse Sign-bit Checkpoint
 256 0.022 0.025 0.025 0.025
@@ -89,6 +96,10 @@ def plot_time(dataset):
         dataset["table"], x_name=dataset["x_name"], y_scale=dataset["y_scale"],
     )
 
+    x_scale = dataset.get("x_scale", 1.0)
+    if x_scale != 1.0:
+        series = [(name, [x * x_scale for x in xs], ys)
+                  for name, xs, ys in series]
     fig, ax = plt.subplots()
     # One line per configuration, each solid with its own marker.
     plot_series(ax, series)
