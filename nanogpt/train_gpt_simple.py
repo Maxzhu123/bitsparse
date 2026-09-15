@@ -139,9 +139,7 @@ class MLP(nn.Module):
                 z.reshape(-1, z.shape[-1]), self.proj.weight.type_as(x), self.sparse_data, self.pack_sbit,
             )
             return y.reshape(x.shape) + self.proj.bias.type_as(x)
-        # Add bias separately in both modes to keep BF16 rounding comparable.
-        y = F.linear(z.relu().square(), self.proj.weight.type_as(x))
-        return y + self.proj.bias.type_as(x)
+        return self.proj(z.relu_().square())
 
 class Block(nn.Module):
     def __init__(self, dim: int, use_bitsparse: bool = False, pack_sbit: bool = True):
