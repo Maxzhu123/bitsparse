@@ -4,6 +4,7 @@ from torch import Tensor
 from torch.autograd import Function
 
 from .src.functions import dense_to_tilesparse
+from .src.ops import dense_to_tilesparse_custom
 from .src.sparse_matmul import AspB, AspRelu2B
 from .src.triton_operators import mask_with_bitmask_, relu2_grad_sparse_
 from .bitsparse import BitsparseTensor, TensorBuffer
@@ -82,7 +83,6 @@ class ReluLinear(Function):
         return y
 
     @staticmethod
-    @torch.compiler.disable
     def backward(ctx, grad_output: Tensor):
         """Compute gradients."""
         W = ctx.saved_tensors[0]
@@ -170,17 +170,16 @@ class Relu2Linear(Function):
         else:
             h_stored, scale = h, None
 
-        h_sparse = dense_to_tilesparse(h_stored, scale, sparse_data, pack_sbit)
+        h_sparse = dense_to_tilesparse_custom(h_stored, scale, sparse_data, pack_sbit)
         ctx.h_sparse = h_sparse
 
         # Forward matmul uses the squared activation
-        h.square_()
+        h = h.square()
         h.mul_(RELU2_SCALE)
         y = matmul(h, W.T, is_fp8(storage_dtype))
         return y
 
     @staticmethod
-    # @torch.compiler.disable
     def backward(ctx, grad_output: Tensor):
         """Compute gradients."""
         W = ctx.saved_tensors[0]
