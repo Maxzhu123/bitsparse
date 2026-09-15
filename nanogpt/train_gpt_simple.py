@@ -4,12 +4,9 @@ train_gpt_simple.py
 This file descends from the [NanoGPT speedrun](https://github.com/KellerJordan/modded-nanogpt).
 It was prepared as a simplified version of the speedrun for use in neural net optimization research.
 """
-
-import argparse
 import os
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 from pathlib import Path
-import sys
-import tempfile
 import time
 from datetime import datetime
 
@@ -17,27 +14,32 @@ import torch
 from torch import Tensor, nn
 from torch.optim import AdamW
 import torch.nn.functional as F
-import torch.distributed as dist
 
 from lib_sparse.layers import FusedRMSNormMLP, Relu2Linear
+from lib_sparse.bitsparse import TensorBuffer
 
 from dataloader import load_data_shard
 
 DATA_ROOT = Path(__file__).resolve().parent
-USE_BITSPARSE = False  # Compress saved MLP activations; no checkpointing or sign packing.
+USE_BITSPARSE = True  # Compress saved MLP activations with 15-bit BF16 packing.
+USE_TENSOR_BUFFER = True  # Requires USE_BITSPARSE.
+BUFFER_SIZE_MIB = 2008  # Covers 12 layers × 64 sequences × 1024 tokens * 768 * 4, packed BF16.
+SEQ_LEN = 1024
+TRAIN_BATCH_TOKENS = 8 * 64 * 1024  # Tokens per optimizer step.
+VAL_TOKENS = 20 * 524288
+TRAIN_MICROBATCH_SEQUENCES = 64  # Tune without changing tokens per optimizer step.
+VAL_MICROBATCH_SEQUENCES = 4
 
 
-def distributed_data_generator(pattern, batch_size, seq_len=1024, device=None):
-    """Partition a global token batch across ranks, cycling training shards."""
-    world_size, rank = dist.get_world_size(), dist.get_rank()
-    if batch_size % (world_size * seq_len):
-        raise ValueError("Global token batch must divide evenly into per-rank sequences")
+def data_generator(pattern, batch_size, seq_len=SEQ_LEN, device=None):
+    """Yield token batches on one GPU, cycling through training shards."""
+    if batch_size % seq_len:
+        raise ValueError("Token batch must divide evenly into sequences")
     files = sorted(DATA_ROOT.glob(pattern))
     if not files:
         raise FileNotFoundError(f"No data shards matched {DATA_ROOT / pattern}")
     if device is None:
         device = torch.device("cuda", torch.cuda.current_device())
-    local_tokens = batch_size // world_size
     shard_index, position = 0, 0
     tokens = load_data_shard(files[shard_index])
     while True:
@@ -49,8 +51,7 @@ def distributed_data_generator(pattern, batch_size, seq_len=1024, device=None):
             tokens = load_data_shard(files[shard_index])
             position = 0
             continue
-        start = position + rank * local_tokens
-        window = tokens[start:start + local_tokens + 1]
+        window = tokens[position:position + batch_size + 1]
         inputs = window[:-1].to(device=device, dtype=torch.int32, non_blocking=True)
         targets = window[1:].to(device=device, dtype=torch.int64, non_blocking=True)
         position += batch_size
@@ -118,9 +119,11 @@ class CausalSelfAttention(nn.Module):
         return y
 
 class MLP(nn.Module):
-    def __init__(self, dim: int, use_bitsparse: bool = False):
+    def __init__(self, dim: int, use_bitsparse: bool = False, pack_sbit: bool = True):
         super().__init__()
         self.use_bitsparse = use_bitsparse
+        self.pack_sbit = pack_sbit
+        self.sparse_data = None
         hdim = 4 * dim
         self.fc = Linear(dim, hdim)
         self.proj = Linear(hdim, dim)
@@ -133,7 +136,7 @@ class MLP(nn.Module):
         z = z + self.fc.bias.type_as(x)
         if self.use_bitsparse:
             y = Relu2Linear.apply(
-                z.reshape(-1, z.shape[-1]), self.proj.weight.type_as(x), None, False,
+                z.reshape(-1, z.shape[-1]), self.proj.weight.type_as(x), self.sparse_data, self.pack_sbit,
             )
             return y.reshape(x.shape) + self.proj.bias.type_as(x)
         # Add bias separately in both modes to keep BF16 rounding comparable.
@@ -141,10 +144,10 @@ class MLP(nn.Module):
         return y + self.proj.bias.type_as(x)
 
 class Block(nn.Module):
-    def __init__(self, dim: int, use_bitsparse: bool = False):
+    def __init__(self, dim: int, use_bitsparse: bool = False, pack_sbit: bool = True):
         super().__init__()
         self.attn = CausalSelfAttention(dim)
-        self.mlp = MLP(dim, use_bitsparse)
+        self.mlp = MLP(dim, use_bitsparse, pack_sbit)
         self.norm1 = RMSNorm(dim)
         self.norm2 = RMSNorm(dim)
 
@@ -154,18 +157,40 @@ class Block(nn.Module):
         return x
 
 class GPT(nn.Module):
-    def __init__(self, vocab_size: int, num_layers: int, model_dim: int, use_bitsparse: bool = False):
+    def __init__(self, vocab_size: int, num_layers: int, model_dim: int, use_bitsparse: bool = False,
+                 pack_sbit: bool = True):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, model_dim).bfloat16()
-        self.blocks = nn.ModuleList([Block(model_dim, use_bitsparse) for _ in range(num_layers)])
+        self.blocks = nn.ModuleList([Block(model_dim, use_bitsparse, pack_sbit) for _ in range(num_layers)])
+        self.pack_sbit = pack_sbit
         self.proj = Linear(model_dim, vocab_size)
         self.norm1 = RMSNorm(model_dim)
         self.norm2 = RMSNorm(model_dim)
+        self.sparse_data = None
+
+    def set_tensor_buffer(self, buffer):
+        self.sparse_data = buffer
+        for block in self.blocks:
+            block.mlp.sparse_data = buffer
+
+    def required_buffer_bytes(self, tokens):
+        if not self.pack_sbit:
+            return sum(tokens * block.mlp.fc.out_features * 2 for block in self.blocks)
+        # Each layer's starting offset is aligned to eight logical values.
+        values = sum((tokens * block.mlp.fc.out_features + 7) // 8 * 8 for block in self.blocks)
+        return values * 15 // 8
 
     def forward(self, inputs: Tensor, targets: Tensor):
+        if self.sparse_data is not None:
+            # Only one outstanding microbatch: finish backward before the next forward.
+            self.sparse_data.reset_buffer()
         x = self.norm1(self.embed(inputs))
         for block in self.blocks:
             x = block(x)
+        return self._cross_entropy(x, targets)
+
+    @torch.compile(dynamic=False)
+    def _cross_entropy(self, x: Tensor, targets: Tensor):
         logits = self.proj(self.norm2(x)).float()
         logits = 15 * logits * (logits.square() + 15**2).rsqrt()
         return F.cross_entropy(logits.view(targets.numel(), -1), targets.view(-1), reduction="sum")
@@ -211,227 +236,207 @@ class Muon(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step(self):
-        world_size = dist.get_world_size()
-        rank = dist.get_rank()
         for group in self.param_groups:
-            params = group["params"]
-            params_pad = params + [torch.empty_like(params[-1])] * (world_size - len(params) % world_size)
-            for base_i in range(0, len(params), world_size):
-                if base_i + rank < len(params):
-                    p = params[base_i + rank]
-                    state = self.state[p]
-                    if len(state) == 0:
-                        state["momentum"] = torch.zeros_like(p)
-                    update = muon_update(p.grad, state["momentum"], mu=group["mu"])
-                    p.mul_(1 - group["lr"] * group["weight_decay"])
-                    p.add_(update, alpha=-group["lr"])
-                dist.all_gather(params_pad[base_i:base_i + world_size], params_pad[base_i + rank])
+            for p in group["params"]:
+                state = self.state[p]
+                if len(state) == 0:
+                    state["momentum"] = torch.zeros_like(p)
+                update = muon_update(p.grad, state["momentum"], mu=group["mu"])
+                p.mul_(1 - group["lr"] * group["weight_decay"])
+                p.add_(update, alpha=-group["lr"])
 
 
 ########################################
 #                Setup                 #
 ########################################
 
-def train(device, num_trials):
+
+def train(device):
     save_every = 300
+    if USE_TENSOR_BUFFER and not USE_BITSPARSE:
+        raise ValueError("USE_TENSOR_BUFFER requires USE_BITSPARSE=True")
 
-    def print0(s, console=True, log=True):
-        if dist.get_rank() == 0:
-            if console:
-                print(s, flush=True)
-            if log:
-                with open(logfile, "a") as f:
-                    print(s, file=f)
+    def print_log(s, console=True, log=True):
+        if console:
+            print(s, flush=True)
+        if log:
+            with open(logfile, "a") as f:
+                print(s, file=f)
 
-    val_tokens = 20 * 524288
-    batch_size = 8 * 64 * 1024
-    # Four sequences per microbatch on each GPU; preserve the global token batches.
-    train_num_microbatches = 128 // dist.get_world_size()
-    val_num_microbatches = 2560 // dist.get_world_size()
+    val_tokens = VAL_TOKENS
+    batch_size = TRAIN_BATCH_TOKENS
+    if TRAIN_MICROBATCH_SEQUENCES < 1 or VAL_MICROBATCH_SEQUENCES < 1:
+        raise ValueError("Microbatch sizes must be positive")
+    if batch_size % SEQ_LEN:
+        raise ValueError("Token batch must divide evenly into sequences")
+    sequences = batch_size // SEQ_LEN
+    accumulation_steps = (sequences + TRAIN_MICROBATCH_SEQUENCES - 1) // TRAIN_MICROBATCH_SEQUENCES
 
-    def resolve_microbatch_size(num_sequences: int, num_microbatches: int) -> int:
-        assert num_sequences % num_microbatches == 0, "num_microbatches must evenly divide the batch"
-        return num_sequences // num_microbatches
-
-    val_inputs, val_targets = next(distributed_data_generator("data/fineweb10B/fineweb_val_*.bin", val_tokens, device="cpu"))
-    val_inputs, val_targets = val_inputs.cpu(), val_targets.cpu()
+    val_inputs, val_targets = next(data_generator("data/fineweb10B/fineweb_val_*.bin", val_tokens, SEQ_LEN, device="cpu"))
 
     model = GPT(vocab_size=50304, num_layers=12, model_dim=768, use_bitsparse=USE_BITSPARSE).to(device)
     model.compile(dynamic=False)
 
 
 
-    for _ in range(num_trials):
-        if dist.get_rank() == 0:
-            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')
-            model_dir = DATA_ROOT / "logs" / timestamp
-            model_dir.mkdir(parents=True)
-            logfile = model_dir / f"{timestamp}.txt"
-            print(logfile)
-        # we begin by logging this file itself
-        print0(Path(__file__).read_text())
-        print0(f"USE_BITSPARSE={USE_BITSPARSE}", console=True)
-        print0("="*100)
-        print0(f"Running PyTorch {torch.version.__version__} compiled for CUDA {torch.version.cuda}"
-               + f" on {torch.cuda.get_device_name(device)} with world_size {dist.get_world_size()}")
-        print0("="*100)
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')
+    model_dir = DATA_ROOT / "logs" / timestamp
+    model_dir.mkdir(parents=True)
+    logfile = model_dir / f"{timestamp}.txt"
+    print(logfile)
+    # we begin by logging this file itself
+    print_log(Path(__file__).read_text(), console=False)
+    print_log(f"USE_BITSPARSE={USE_BITSPARSE}", console=True)
+    print_log(f"sequence length={SEQ_LEN}, batch={batch_size} tokens, "
+           f"train microbatch={TRAIN_MICROBATCH_SEQUENCES} sequences, "
+           f"accumulation={accumulation_steps}, validation microbatch={VAL_MICROBATCH_SEQUENCES} sequences")
+    print_log("="*100)
+    print_log(f"Running PyTorch {torch.version.__version__} compiled for CUDA {torch.version.cuda}"
+           + f" on {torch.cuda.get_device_name(device)}")
+    print_log("="*100)
 
 
-        ########################################
-        #       Init & Optim Hyperparams       #
-        ########################################
+    ########################################
+    #       Init & Optim Hyperparams       #
+    ########################################
 
-        # we want to minimize this while still reaching 3.28 val loss
-        train_steps = 3350
+    # we want to minimize this while still reaching 3.28 val loss
+    train_steps = 3350
 
-        # initialize model parameters
-        for name, p in model.named_parameters():
-            w = p.data
-            if name.endswith("weight"):
-                if "proj" in name:
-                    w.zero_()
-                elif "embed" in name:
-                    w.normal_()  # default torch init
-                else:
-                    w.normal_(std=0.33**0.5 / w.size(-1)**0.5)  # default torch init
-            elif name.endswith("bias"):
+    # initialize model parameters
+    for name, p in model.named_parameters():
+        w = p.data
+        if name.endswith("weight"):
+            if "proj" in name:
                 w.zero_()
-            elif name.endswith("gains"):
-                w.normal_(mean=1, std=0)
+            elif "embed" in name:
+                w.normal_()  # default torch init
             else:
-                raise Exception(f"Uninitialized parameter: {name}")
+                w.normal_(std=0.33**0.5 / w.size(-1)**0.5)  # default torch init
+        elif name.endswith("bias"):
+            w.zero_()
+        elif name.endswith("gains"):
+            w.normal_(mean=1, std=0)
+        else:
+            raise Exception(f"Uninitialized parameter: {name}")
+    print("Weights initialised")
 
-        # create the optimizer(s)
-        optimizer1 = AdamW([dict(params=[model.embed.weight], lr=0.3),
-                            dict(params=[model.proj.weight], lr=1/320),
-                            dict(params=[p for p in model.parameters() if p.ndim < 2], lr=0.01)],
-                           betas=(0.8, 0.95), eps=1e-10, weight_decay=0, fused=True)
-        optimizer2 = Muon([p for p in model.blocks.parameters() if p.ndim >= 2],
-                          lr=0.035, weight_decay=0.025)
-        optimizers = [optimizer1, optimizer2]
-        assert set(p for opt in optimizers for group in opt.param_groups
-                   for p in group["params"]) == set(model.parameters())
+    # create the optimizer(s)
+    optimizer1 = AdamW([dict(params=[model.embed.weight], lr=0.3),
+                        dict(params=[model.proj.weight], lr=1/320),
+                        dict(params=[p for p in model.parameters() if p.ndim < 2], lr=0.01)],
+                       betas=(0.8, 0.95), eps=1e-10, weight_decay=0, fused=True)
+    optimizer2 = Muon([p for p in model.blocks.parameters() if p.ndim >= 2],
+                      lr=0.035, weight_decay=0.025)
+    optimizers = [optimizer1, optimizer2]
+    assert set(p for opt in optimizers for group in opt.param_groups
+               for p in group["params"]) == set(model.parameters())
+    for opt in optimizers:
+        for group in opt.param_groups:
+            group["initial_lr"] = group["lr"]
+
+    # learning rate schedule: stable then decay
+    def set_hparams(step, cooldown_frac=0.7):
+        progress = step / train_steps
+        assert 0 <= progress < 1
+        if progress < 1 - cooldown_frac:
+            eta = 1.0
+        else:
+            eta = (1 - progress) / cooldown_frac
         for opt in optimizers:
             for group in opt.param_groups:
-                group["initial_lr"] = group["lr"]
+                group["lr"] = group["initial_lr"] * eta
 
-        # learning rate schedule: stable then decay
-        def set_hparams(step, cooldown_frac=0.7):
-            progress = step / train_steps
-            assert 0 <= progress < 1
-            if progress < 1 - cooldown_frac:
-                eta = 1.0
-            else:
-                eta = (1 - progress) / cooldown_frac
-            for opt in optimizers:
-                for group in opt.param_groups:
-                    group["lr"] = group["initial_lr"] * eta
+    ########################################
+    #        Training and Validation       #
+    ########################################
 
+    train_loader = data_generator("data/fineweb10B/fineweb_train_*.bin", batch_size, SEQ_LEN)
+    if USE_TENSOR_BUFFER:
+        model.set_tensor_buffer(TensorBuffer(
+            BUFFER_SIZE_MIB * 2**20, device=device, dtype=torch.bfloat16, pack_sbit=True,
+        ))
+        print_log(f"Tensor buffer: {BUFFER_SIZE_MIB} MiB")
 
-        ########################################
-        #        Training and Validation       #
-        ########################################
+    # save model at step 0 before any training
+    with torch.no_grad():
+        torch.save({k: v.detach().cpu() for k, v in model.state_dict().items()},
+                   f"{model_dir}/0.pt")
+    torch.cuda.synchronize(device)
 
-        train_loader = distributed_data_generator("data/fineweb10B/fineweb_train_*.bin", batch_size)
-        for p in model.parameters():
-            dist.broadcast(p.detach(), 0)
+    # start the clock
+    training_time = 0
+    last_val_step = 0
+    torch.cuda.synchronize(device)
+    t0 = time.perf_counter()
+    step_start = t0
+    print("Starting training")
+    for step in range(train_steps + 1):
 
-        # save model at step 0 before any training
-        if dist.get_rank() == 0:
+        # --------------- VALIDATION SECTION -----------------
+        val_step_freq = 125 if step / train_steps < 0.9 else 25
+        if step == train_steps or step % val_step_freq == 0:
+            # stop the clock
+            torch.cuda.synchronize(device)
+            time_since_last_val = time.perf_counter() - t0
+            step_avg = time_since_last_val / (step - last_val_step) if step > 0 else float("nan")
+            last_val_step = step
+            training_time += time_since_last_val
+            model.eval()
+            val_loss = 0
+            with torch.no_grad():
+                val_mbs = VAL_MICROBATCH_SEQUENCES
+                for i in range(0, len(val_inputs), val_mbs):
+                    v_in = val_inputs[i:i+val_mbs].to(device=device, non_blocking=True)
+                    v_tgt = val_targets[i:i+val_mbs].to(device=device, non_blocking=True)
+                    val_loss += model(v_in, v_tgt)
+            val_loss /= val_tokens
+            print_log(f"step:{step}/{train_steps} val_loss:{val_loss:.5f} train_time:{training_time:.3f}s"
+                   + f" time_since_last_val:{time_since_last_val:.3f}s", console=True)
+            model.train()
+            # start the clock again
+            torch.cuda.synchronize(device)
+            t0 = time.perf_counter()
+            step_start = t0
+
+            del v_in, v_tgt
+            torch.cuda.empty_cache()
+
+        if step == train_steps:
+            break
+
+        # --------------- TRAINING SECTION -----------------
+        inputs, targets = next(train_loader)
+        train_mbs = TRAIN_MICROBATCH_SEQUENCES
+        for i in range(0, len(inputs), train_mbs):
+            model(inputs[i:i+train_mbs], targets[i:i+train_mbs]).backward()
+        for name, p in model.named_parameters():
+            assert p.grad is not None, name
+        # set optimization hyperparameters and take a step
+        set_hparams(step)
+        for opt in optimizers:
+            opt.step()
+        model.zero_grad(set_to_none=True)
+        if (step + 1) % save_every == 0 or step + 1 == train_steps:
             with torch.no_grad():
                 torch.save({k: v.detach().cpu() for k, v in model.state_dict().items()},
-                           f"{model_dir}/0.pt")
-        dist.barrier()
-
-        # start the clock
-        training_time = 0
-        last_val_step = 0
-        dist.barrier()
-        t0 = time.perf_counter()
-        step_start = t0
-        for step in range(train_steps + 1):
-
-            # --------------- VALIDATION SECTION -----------------
-            val_step_freq = 125 if step / train_steps < 0.9 else 25
-            if step == train_steps or step % val_step_freq == 0:
-                # stop the clock
-                dist.barrier()
-                time_since_last_val = time.perf_counter() - t0
-                step_avg = time_since_last_val / (step - last_val_step) if step > 0 else float("nan")
-                last_val_step = step
-                training_time += time_since_last_val
-                model.eval()
-                val_loss = 0
-                with torch.no_grad():
-                    val_mbs = resolve_microbatch_size(len(val_inputs), val_num_microbatches)
-                    for i in range(len(val_inputs) // val_mbs):
-                        v_in = val_inputs[i*val_mbs:(i+1)*val_mbs].to(device=device, non_blocking=True)
-                        v_tgt = val_targets[i*val_mbs:(i+1)*val_mbs].to(device=device, non_blocking=True)
-                        val_loss += model(v_in, v_tgt)
-                dist.all_reduce(val_loss, op=dist.ReduceOp.SUM)
-                val_loss /= val_tokens
-                print0(f"step:{step}/{train_steps} val_loss:{val_loss:.5f} train_time:{training_time:.3f}s"
-                       + f" time_since_last_val:{time_since_last_val:.3f}s", console=True)
-                model.train()
-                # start the clock again
-                dist.barrier()
-                t0 = time.perf_counter()
-                step_start = t0
-
-            if step == train_steps:
-                break
-
-            # --------------- TRAINING SECTION -----------------
-            inputs, targets = next(train_loader)
-            # accumulate across microbatches (set NUM_MICROBATCHES to control the split)
-            train_mbs = resolve_microbatch_size(len(inputs), train_num_microbatches)
-            for i in range(len(inputs) // train_mbs):
-                model(inputs[i*train_mbs:(i+1)*train_mbs], targets[i*train_mbs:(i+1)*train_mbs]).backward()
-            for name, p in model.named_parameters():
-                assert p.grad is not None, name
-                dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
-            # set optimization hyperparameters and take a step
-            set_hparams(step)
-            for opt in optimizers:
-                opt.step()
-            model.zero_grad(set_to_none=True)
-            if (step + 1) % save_every == 0 or step + 1 == train_steps:
-                if dist.get_rank() == 0:
-                    with torch.no_grad():
-                        torch.save({k: v.detach().cpu() for k, v in model.state_dict().items()},
-                                   f"{model_dir}/{step + 1}.pt")
-                dist.barrier()
-            approx_training_time = training_time + (time.perf_counter() - t0)
-            step_time = time.perf_counter() - step_start
-            step_start = time.perf_counter()
-            print0(f"step:{step+1}/{train_steps} train_time:{approx_training_time:.3f}s"
-                   + f" step_time:{step_time:.3f}s", console=True, log=False)
+                           f"{model_dir}/{step + 1}.pt")
+            torch.cuda.synchronize(device)
+        torch.cuda.synchronize(device)
+        approx_training_time = training_time + (time.perf_counter() - t0)
+        step_time = time.perf_counter() - step_start
+        step_start = time.perf_counter()
+        print_log(f"step:{step+1}/{train_steps} train_time:{approx_training_time:.3f}s"
+               + f" step_time:{step_time:.3f}s", console=True, log=False)
 
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train NanoGPT on one GPU or with torchrun")
-    parser.add_argument("num_trials", type=int, nargs="?", default=1)
-    args = parser.parse_args()
-    if args.num_trials < 1:
-        parser.error("num_trials must be positive")
     if not torch.cuda.is_available():
         raise RuntimeError("Training requires CUDA")
-    device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", 0)))
+    device = torch.device("cuda:0")
     torch.cuda.set_device(device)
-    # Plain Python uses a local rendezvous; torchrun supplies its own rank settings.
-    with tempfile.TemporaryDirectory(prefix="nanogpt_rendezvous_") as directory:
-        if "RANK" in os.environ:
-            dist.init_process_group(backend="nccl", device_id=device)
-        else:
-            dist.init_process_group(backend="nccl", device_id=device, rank=0, world_size=1,
-                                    init_method=(Path(directory) / "store").as_uri())
-        try:
-            if dist.get_world_size() not in (1, 2, 4, 8):
-                raise ValueError("Training supports 1, 2, 4, or 8 GPUs")
-            train(device, args.num_trials)
-        finally:
-            dist.destroy_process_group()
+    train(device)
 
 
 if __name__ == "__main__":
