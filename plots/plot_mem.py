@@ -50,9 +50,9 @@ datasets = {
         # Fitting the longer span gives sign-bit a steeper slope than the run it
         # is a strict improvement on, so its fit stops at BitSparse's last
         # measurement even though the 7500 point is still plotted.
-        "fit_max": {"Sign-bit": 7000.0},
+        "fit_max": {"BitSparse-sb": 7000.0},
         "table": """
-Length Dense BitSparse Sign-bit Checkpoint
+Length Dense BitSparse BitSparse-sb Checkpoint
 50 16704 16663 16663 16655
 100 16844 16761 16760 16745
 200 17115 16950 16949 16918
@@ -87,7 +87,7 @@ Length Dense BitSparse Sign-bit Checkpoint
         "x_scale": 4.0,
         "x_step": 20000.0,
         "table": """
-Length Dense BitSparse Sign-bit Checkpoint
+Length Dense BitSparse BitSparse-sb Checkpoint
 256 1281 1148 1146 1117
 512 1653 1394 1388 1248
 1024 2484 1973 1968 1785

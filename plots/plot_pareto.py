@@ -32,7 +32,7 @@ YLABEL = "VRAM / GiB"
 
 # Each table records VRAM in MiB; the axis is labelled in GiB.
 datasets = {
-    "relu2_90_pareto.pdf": """Checkpoint                  BitSparse                   Sign-bit
+    "relu2_90_pareto.pdf": """Checkpoint                  BitSparse                   BitSparse-sb
 layers  vram     avg_time     vram     avg_time     vram     avg_time
 0       11343.5  1830.7       11343.5  1830.7       11343.5  1830.7
 1       10688.2  1870.6       11056.6  1829.4       11035.6  1832.6
@@ -43,7 +43,7 @@ layers  vram     avg_time     vram     avg_time     vram     avg_time
 6       7411.6   2068.7       8198.6   1820.4       8165.0   1830.6
 7       6756.3   2108.8       7614.3   1818.8       7578.8   1830.3
 8       6713.3   2148.2       5895.8   1815.9       5860.0   1829.2""",
-    "relu_90_pareto.pdf": """Checkpoint                  BitSparse                   Sign-bit
+    "relu_90_pareto.pdf": """Checkpoint                  BitSparse                   BitSparse-sb
 layers  vram     avg_time     vram     avg_time     vram     avg_time
 0       10039.0  1764.1       10039.0  1764.3       10039.0  1766.7
 1       9382.7   1803.2       9749.1   1769.0       9731.1   1771.1
@@ -54,7 +54,7 @@ layers  vram     avg_time     vram     avg_time     vram     avg_time
 6       6101.1   1987.7       6752.0   1782.5       6724.9   1791.5
 7       5933.1   2024.7       6148.8   1785.2       6121.0   1794.8
 8       6057.1   2062.5       5741.5   1787.3       5714.7   1797.9""",
-    "relu_50_pareto.pdf": """Checkpoint                  BitSparse                   Sign-bit
+    "relu_50_pareto.pdf": """Checkpoint                  BitSparse                   BitSparse-sb
 layers  vram     avg_time     vram     avg_time     vram     avg_time
 0       10038.0  1770.8       10038.0  1767.2       10038.0  1767.5
 1       9382.7   1807.2       9749.2   1771.7       9731.1   1775.0
@@ -65,7 +65,7 @@ layers  vram     avg_time     vram     avg_time     vram     avg_time
 6       6101.1   1993.7       8220.6   1787.8       8101.1   1802.9
 7       5933.1   2030.4       7887.9   1790.7       7751.6   1807.5
 8       6057.1   2066.9       7796.5   1793.4       7629.7   1817.6""",
-    "relu2_50_pareto.pdf": """Checkpoint                  BitSparse                   Sign-bit
+    "relu2_50_pareto.pdf": """Checkpoint                  BitSparse                   BitSparse-sb
 layers  vram     avg_time     vram     avg_time     vram     avg_time
 0       11342.5  1835.8       11342.5  1831.3       11342.5  1831.2
 1       10688.2  1873.2       11056.7  1831.2       11036.6  1832.9

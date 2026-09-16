@@ -73,7 +73,7 @@ NEUTRAL_COLOR = "#333333"
 CONFIG_STYLES = {
     "Dense": {"color": NEUTRAL_COLOR, "marker": "o"},
     "BitSparse": {"color": "#0072B2", "marker": "s"},
-    "Sign-bit": {"color": "#D55E00", "marker": "^"},
+    "BitSparse-sb": {"color": "#D55E00", "marker": "^"},
     "Checkpoint": {"color": "#009E73", "marker": "D"},
 }
 
