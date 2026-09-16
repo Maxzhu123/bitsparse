@@ -23,12 +23,12 @@ from dataloader import load_data_shard
 DATA_ROOT = Path(__file__).resolve().parent
 USE_BITSPARSE = True  # Compress saved MLP activations with 15-bit BF16 packing.
 USE_TENSOR_BUFFER = True  # Requires USE_BITSPARSE.
-BUFFER_SIZE_MIB = 2008  # Covers 12 layers × 64 sequences × 1024 tokens * 768 * 4, packed BF16.
+BUFFER_SIZE_MIB = 2408  # Covers 12 layers × 64 sequences × 1024 tokens * 768 * 4, packed BF16.
 SEQ_LEN = 1024
 TRAIN_BATCH_TOKENS = 8 * 64 * 1024  # Tokens per optimizer step.
 VAL_TOKENS = 20 * 524288
 TRAIN_MICROBATCH_SEQUENCES = 64  # Tune without changing tokens per optimizer step.
-VAL_MICROBATCH_SEQUENCES = 4
+VAL_MICROBATCH_SEQUENCES = 32
 
 
 def data_generator(pattern, batch_size, seq_len=SEQ_LEN, device=None):
@@ -208,7 +208,7 @@ def zeropower_via_newtonschulz5(G: Tensor) -> Tensor:
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
     # Perform the NS iterations, not optimizing for wallclock speed
     a, b, c = 2, -1.5, 0.5
-    for _ in range(8):
+    for _ in range(12):
         A = X @ X.mT
         B = b * A + c * A @ A
         X = a * X + B @ X
@@ -218,7 +218,7 @@ def zeropower_via_newtonschulz5(G: Tensor) -> Tensor:
     return X
 
 @torch.compile(fullgraph=True)
-def muon_update(grad, momentum, mu=0.95, nesterov=False):
+def muon_update(grad, momentum, mu=0.95, nesterov=True):
     momentum.lerp_(grad, 1 - mu)
     update = grad.lerp_(momentum, mu) if nesterov else momentum
     update = zeropower_via_newtonschulz5(update)
@@ -260,6 +260,12 @@ def train(device):
         if log:
             with open(logfile, "a") as f:
                 print(s, file=f)
+
+    def memory_stats():
+        return (f"allocated:{torch.cuda.memory_allocated(device) / 2**20:.1f}MiB"
+                f" peak_allocated:{torch.cuda.max_memory_allocated(device) / 2**20:.1f}MiB"
+                f" reserved:{torch.cuda.memory_reserved(device) / 2**20:.1f}MiB"
+                f" peak_reserved:{torch.cuda.max_memory_reserved(device) / 2**20:.1f}MiB")
 
     val_tokens = VAL_TOKENS
     batch_size = TRAIN_BATCH_TOKENS
@@ -381,6 +387,7 @@ def train(device):
             last_val_step = step
             training_time += time_since_last_val
             model.eval()
+            torch.cuda.reset_peak_memory_stats(device)
             val_loss = 0
             with torch.no_grad():
                 val_mbs = VAL_MICROBATCH_SEQUENCES
@@ -390,7 +397,7 @@ def train(device):
                     val_loss += model(v_in, v_tgt)
             val_loss /= val_tokens
             print_log(f"step:{step}/{train_steps} val_loss:{val_loss:.5f} train_time:{training_time:.3f}s"
-                   + f" time_since_last_val:{time_since_last_val:.3f}s", console=True)
+                   + f" time_since_last_val:{time_since_last_val:.3f}s {memory_stats()}", console=True)
             model.train()
             # start the clock again
             torch.cuda.synchronize(device)
@@ -404,6 +411,7 @@ def train(device):
             break
 
         # --------------- TRAINING SECTION -----------------
+        torch.cuda.reset_peak_memory_stats(device)
         inputs, targets = next(train_loader)
         train_mbs = TRAIN_MICROBATCH_SEQUENCES
         for i in range(0, len(inputs), train_mbs):
@@ -425,7 +433,7 @@ def train(device):
         step_time = time.perf_counter() - step_start
         step_start = time.perf_counter()
         print_log(f"step:{step+1}/{train_steps} train_time:{approx_training_time:.3f}s"
-               + f" step_time:{step_time:.3f}s", console=True, log=False)
+               + f" step_time:{step_time:.3f}s {memory_stats()}", console=True)
 
 
 
