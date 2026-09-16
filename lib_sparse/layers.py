@@ -4,7 +4,7 @@ from torch import Tensor
 from torch.autograd import Function
 
 from .src.functions import dense_to_tilesparse
-from .src.ops import dense_to_tilesparse_custom
+from .src.ops import dense_to_tilesparse_custom, rms_norm_linear
 from .src.sparse_matmul import AspB, AspRelu2B
 from .src.triton_operators import mask_with_bitmask_, relu2_grad_sparse_
 from .bitsparse import BitsparseTensor, TensorBuffer
@@ -18,42 +18,13 @@ if TYPE_CHECKING:
 # ------------------------------------------------------------
 # Fused RMS norm-linear
 # ------------------------------------------------------------
-class FusedRMSNormMLP(Function):
-    """Bias-free RMSNorm/linear with BF16 inputs/weights and optional FP8 GEMMs."""
+class FusedRMSNormMLP:
+    """Bias-free RMSNorm/linear with opaque forward and recomputing backward."""
 
     @staticmethod
-    def forward(ctx, x: Tensor, W1: Tensor, norm_weight: Tensor | None = None,
-                eps: float = 1e-6, fp8: bool = False):
-        """BF16 x[..., in] and W1[out, in]; fp8 enables scaled E4M3 GEMMs."""
-        normalized, rstd = torch.ops.aten._fused_rms_norm.default(
-            x, [x.shape[-1]], norm_weight, eps,
-        )
-        ctx.save_for_backward(x, W1, norm_weight, rstd)
-        ctx.eps = eps
-        ctx.fp8 = fp8
-        output = matmul(normalized.reshape(-1, x.shape[-1]), W1.T, fp8)
-        return output.reshape(*x.shape[:-1], W1.shape[0])
-
-    @staticmethod
-    @torch.autograd.function.once_differentiable
-    def backward(ctx, grad_output: Tensor):
-        x, W1, norm_weight, rstd = ctx.saved_tensors
-        grad_output = grad_output.reshape(-1, W1.shape[0])
-        if ctx.fp8:
-            grad_output, grad_scale = to_fp8(grad_output)
-        else:
-            grad_scale = None
-        grad_normalized = matmul(grad_output, W1, ctx.fp8, a_scale=grad_scale).reshape(x.shape)
-        grad_x, grad_norm_weight = torch.ops.aten._fused_rms_norm_backward.default(
-            grad_normalized, x, [x.shape[-1]], rstd, norm_weight,
-            [True, norm_weight is not None],
-        )
-        del grad_normalized
-
-        # Recompute the BF16 projection input and allocate the large weight gradient last.
-        normalized = torch.nn.functional.rms_norm(x, [x.shape[-1]], norm_weight, ctx.eps)
-        grad_W1 = matmul(grad_output.T, normalized.reshape(-1, x.shape[-1]), ctx.fp8, a_scale=grad_scale)
-        return grad_x, grad_W1, grad_norm_weight, None, None
+    def apply(x: Tensor, W1: Tensor, norm_weight: Tensor | None = None,
+              eps: float | None = 1e-6, fp8: bool = False):
+        return rms_norm_linear(x, W1, norm_weight, eps, fp8)[0]
 
 
 # ------------------------------------------------------------
