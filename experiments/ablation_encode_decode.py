@@ -20,6 +20,8 @@ from lib_sparse.src.functions import dense_to_tilesparse
 BATCH_SIZE = 65_536
 WIDTH = 8_192
 DTYPE = torch.bfloat16
+# Bound PyTorch indexing/scan workspaces without launching one operation per tile.
+TILE_ROWS_PER_CHUNK = 128
 
 
 def encode(data, sparse=False):
@@ -31,14 +33,31 @@ def encode(data, sparse=False):
     if rows % BLOCK_M or columns % BLOCK_N:
         data = F.pad(data, (0, grid_n * BLOCK_N - columns, 0, grid_m * BLOCK_M - rows))
     tiles = data.reshape(grid_m, BLOCK_M, grid_n, BLOCK_N).permute(0, 2, 1, 3)
-    tiles = tiles.reshape(num_tiles, tile_numel)
-    mask = tiles > 0
+    mask = (tiles > 0).reshape(num_tiles, tile_numel)
     shifts = torch.arange(8, device=data.device, dtype=torch.uint8)
     bitmask = (mask.reshape(-1, 8).to(torch.uint8) << shifts).sum(dim=1, dtype=torch.uint8)
-    counts = mask.sum(dim=1, dtype=torch.int32)
+    # Count packed bytes instead of promoting the full boolean mask to int32.
+    byte_counts = bitmask - ((bitmask >> 1) & 0x55)
+    byte_counts = (byte_counts & 0x33) + ((byte_counts >> 2) & 0x33)
+    byte_counts.add_(byte_counts >> 4).bitwise_and_(0x0F)
+    counts = byte_counts.reshape(num_tiles, -1).sum(dim=1, dtype=torch.int32)
+    del byte_counts
     prefix = torch.zeros(num_tiles + 1, device=data.device, dtype=torch.uint32)
     torch.cumsum(counts, dim=0, out=prefix.view(torch.int32)[1:])
-    vals = tiles.flatten()[mask.flatten()]
+    chunk_tiles = TILE_ROWS_PER_CHUNK * grid_n
+    # Read allocation size and chunk offsets before compaction.
+    offsets = prefix[::chunk_tiles].tolist()
+    if num_tiles % chunk_tiles:
+        offsets.append(prefix[-1].item())
+    vals = torch.empty(offsets[-1], device=data.device, dtype=data.dtype)
+    for chunk, first in enumerate(range(0, num_tiles, chunk_tiles)):
+        last = min(first + chunk_tiles, num_tiles)
+        chunk_mask = mask[first:last].flatten()
+        chunk_vals = tiles[first // grid_n:(last + grid_n - 1) // grid_n].reshape(-1)
+        # Known counts avoid the per-chunk synchronization of boolean indexing.
+        indices = torch.nonzero_static(chunk_mask, size=offsets[chunk + 1] - offsets[chunk]).flatten()
+        torch.index_select(chunk_vals, 0, indices, out=vals[offsets[chunk]:offsets[chunk + 1]])
+        del chunk_vals, indices
     return BitsparseTensor(
         vals, bitmask, prefix, (rows, columns), data.dtype,
         grid_m, grid_n, BLOCK_M, BLOCK_N,
@@ -51,14 +70,31 @@ def decode(data, sparse=False):
     if sparse:
         return decompress(data)
 
-    shifts = torch.arange(8, device=data.vals.device, dtype=torch.uint8)
-    mask = ((data.bitmask[:, None] >> shifts) & 1).bool().flatten()
-    tiles = torch.zeros(mask.numel(), device=data.vals.device, dtype=data.dtype)
-    tiles.masked_scatter_(mask, data.vals)
-    tiles = tiles.reshape(data.grid_m, data.grid_n, data.BLOCK_M, data.BLOCK_N)
-    dense = tiles.permute(0, 2, 1, 3).reshape(
-        data.grid_m * data.BLOCK_M, data.grid_n * data.BLOCK_N
-    )
+    weights = 1 << torch.arange(8, device=data.vals.device, dtype=torch.uint8)
+    dense = torch.empty((data.grid_m * data.BLOCK_M, data.grid_n * data.BLOCK_N),
+                        device=data.vals.device, dtype=data.dtype)
+    tile_numel = data.BLOCK_M * data.BLOCK_N
+    chunk_tiles = TILE_ROWS_PER_CHUNK * data.grid_n
+    num_tiles = data.grid_m * data.grid_n
+    offsets = data.prefix[::chunk_tiles].tolist()
+    if num_tiles % chunk_tiles:
+        offsets.append(data.prefix[-1].item())
+    for chunk, first in enumerate(range(0, num_tiles, chunk_tiles)):
+        last = min(first + chunk_tiles, num_tiles)
+        bits = data.bitmask[first * tile_numel // 8:last * tile_numel // 8]
+        mask = (bits[:, None] & weights).bool().flatten()
+        indices = torch.nonzero_static(mask, size=offsets[chunk + 1] - offsets[chunk]).flatten()
+        tiles = torch.zeros(mask.numel(), device=data.vals.device, dtype=data.dtype)
+        tiles.index_copy_(0, indices, data.vals[offsets[chunk]:offsets[chunk + 1]])
+        del indices
+        tiles = tiles.reshape(-1, data.grid_n, data.BLOCK_M, data.BLOCK_N)
+        start_row = first // data.grid_n * data.BLOCK_M
+        end_row = last // data.grid_n * data.BLOCK_M
+        # Copy through a strided view instead of allocating another dense layout.
+        dense[start_row:end_row].view(-1, data.BLOCK_M, data.grid_n, data.BLOCK_N).copy_(
+            tiles.permute(0, 2, 1, 3)
+        )
+        del mask, tiles
     return dense[:data.shape[0], :data.shape[1]].contiguous()
 
 
