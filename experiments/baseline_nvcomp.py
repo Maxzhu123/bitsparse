@@ -306,11 +306,10 @@ class FFNRelu2NVCOMP(FFNRelu2ABC):
 if __name__ == "__main__":
     from experiments.experiment import evaluate_nobase
     import experiments.experiment as exp
-    from cprint import c_print
 
     for sparsity, suffix in [("Sparse90", "sparse_90"), ("Normal", "Normal")]:
         exp.DATA_SPARSITY =  sparsity
-        c_print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}", color="bright_green")
+        print(f"Data sparsity overwritten to {exp.DATA_SPARSITY}")
 
         print(f'running with relu')
         with open(f"./results/relu_nvcomp_{suffix}.csv", "a", newline="") as f:

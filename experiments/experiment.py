@@ -6,7 +6,6 @@ import torch.nn.functional as F
 import math
 import time
 import gc
-from cprint import c_print
 import os
 
 from experiments.utils import setup_hooks
@@ -26,7 +25,7 @@ CHECK_RTOL = CHECK_ATOL = 3e-6 if DTYPE == torch.bfloat16 else 1e-1
 
 BASIC_MODE = True
 DATA_SPARSITY = "Normal"        # "Normal", "Sparse", "Sparse90"
-c_print(f'{DATA_SPARSITY = }', color="green")
+print(f'{DATA_SPARSITY = }')
 # ------------------------------------------------------------------------------
 # Evaluation Loop
 # ------------------------------------------------------------------------------

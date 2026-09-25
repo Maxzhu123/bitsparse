@@ -4,7 +4,6 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 from transformers import AutoTokenizer
 import time
-from cprint import c_print
 
 from .utils import print_max_memory
 from .llm import NemotronHForCausalLM
@@ -54,7 +53,7 @@ def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
 
 
     # Warmup
-    # c_print("Starting Warmup", color="cyan")
+    # print("Starting Warmup")
     for _ in range(2):
         if sparse_data is not None:
             sparse_data.reset_buffer()
@@ -63,7 +62,7 @@ def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
         model.zero_grad()
 
     # Timing
-    # c_print("Starting Timing Run", color="cyan")
+    # print("Starting Timing Run")
     torch.cuda.synchronize()
     st = time.perf_counter()
     for _ in range(steps):
@@ -97,9 +96,9 @@ def run_tests(model: NemotronHForCausalLM, tokenizer, device, train_tokens):
 
     if sparse_data is not None:
         if sparse_data.offset > sparse_data.size:
-            c_print(
+            print(
                 f"Warning: Too many values detected, sparse_data.offset={sparse_data.offset.cpu().item()}, {sparse_data.size = }. "
-                f"Results may be incorrect and the program may crash unexpectedly.", color="bright_red")
+                f"Results may be incorrect and the program may crash unexpectedly.")
 
     return total_time, vram
 
@@ -131,7 +130,7 @@ def main():
         # token_sizes = [1100]
         token_sizes = [50, 100, 200, 300, 400, 500, 700, 900, 1100, 1300, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000, 6500, 7000, 7500, 8000]
         for train_tokens in token_sizes:
-            c_print(f'{train_tokens=}, sparse={model.config.sparse_ffn}', color="bright_yellow")
+            print(f'{train_tokens=}, sparse={model.config.sparse_ffn}')
 
             time, vram = run_tests(model, tokenizer, device, train_tokens)
             writer.writerow([train_tokens, vram, time])
