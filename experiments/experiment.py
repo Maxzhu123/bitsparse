@@ -356,15 +356,21 @@ class RMSFFNRelu2(Function):
         else:
             grad_output, scale = grad_output, None
 
-        # Reconstruct k * r² in BF16 (squaring overflows FP8), like AspRelu2B.
+        # Match sparse FP8 rounding: compute unscaled, round, then apply scale.
         if fp8:
-            r = r.to(torch.bfloat16) * r_scale
+            r = r.float()
 
         z = r.square().mul_(RELU2_SCALE)
+        if fp8:
+            z = z.to(torch.bfloat16)
+            z.mul_(r_scale.square())
         grad_W2 = matmul(grad_output.T, z, fp8, a_scale=scale)
         del z
         grad_z = matmul(grad_output, W2, fp8, a_scale=scale)
         grad_preact = grad_z * (2.0 * RELU2_SCALE * r)
+        if fp8:
+            grad_preact = grad_preact.to(grad_z.dtype)
+            grad_preact.mul_(r_scale)
         del grad_z, r
 
         if not torch.compiler.is_compiling():
